@@ -440,3 +440,13 @@ def test_prompt_mentions_only_what_the_run_has(tmp_path):
     client = FakeClient([_msg([_brush(1)])])
     PaintingSession(RunConfig(out_dir=tmp_path / "b", max_actions=1, critic_every=0), client=client).run()
     assert "critic" in client.requests[0]["system"] and "feeling" not in client.requests[0]["system"]
+
+
+def test_a_dropped_connection_mid_stream_is_resent(tmp_path, monkeypatch):
+    from painterly.agent import _httpx
+
+    monkeypatch.setattr("painterly.agent.time.sleep", lambda s: None)
+    client = FakeClient([SCRIPT[0], _httpx.ReadError("[Errno 104] Connection reset by peer"), SCRIPT[-1]])
+    run_dir = PaintingSession(RunConfig(open_ended=False, out_dir=tmp_path), client=client).run()
+    summary = json.loads((run_dir / "summary.json").read_text())
+    assert summary["finished"] and summary["transient_error_retries"] == 1

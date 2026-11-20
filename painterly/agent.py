@@ -15,6 +15,13 @@ from typing import Any
 import anthropic
 from PIL import Image
 
+try:  # the HTTP library the SDK streams with; its transport errors can escape mid-stream
+    import httpx2 as _httpx
+except ImportError:  # pragma: no cover - older SDKs use httpx
+    import httpx as _httpx
+
+_DROPPED = (_httpx.TransportError,)  # connection reset, read timeout, broken stream
+
 from .canvas import Canvas
 from .tools import MARKING_TOOLS, Limits, ToolError, apply_tool, tool_definitions
 
@@ -115,7 +122,7 @@ def is_empty_refusal(msg) -> bool:
 
 
 def _is_transient(e: Exception) -> bool:
-    if isinstance(e, anthropic.APIConnectionError):
+    if isinstance(e, (anthropic.APIConnectionError, *_DROPPED)):
         return True
     status = getattr(e, "status_code", None)
     text = str(getattr(e, "message", "") or e).lower()
@@ -438,7 +445,7 @@ class PaintingSession:
             try:
                 with self.client.beta.messages.stream(**kwargs) as stream:
                     msg = stream.get_final_message()
-            except (anthropic.APIConnectionError, anthropic.APIStatusError) as e:
+            except (anthropic.APIConnectionError, anthropic.APIStatusError, *_DROPPED) as e:
                 # The SDK already retries errors that arrive before the response starts; this
                 # catches ones that arrive mid-stream (some providers send "model temporarily
                 # unavailable" that way). Nothing was added to the conversation, so resend.
