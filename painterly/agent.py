@@ -70,6 +70,17 @@ class RunConfig:
     context_editing: bool = True  # server-side clearing of old canvas views
     thinking_summaries: bool = True  # ask for readable thinking summaries for the journal
     view_size: int = 1024  # longest side of the canvas image the model sees
+    empty_refusal_retries: int = 6  # resend when a backend returns an empty "refusal" (see is_empty_refusal)
+
+
+def is_empty_refusal(msg) -> bool:
+    """A "refusal" with no content and no output tokens.
+
+    Some resellers load-balance across backends, and a bad backend answers every request
+    this way, even a harmless one. Nothing was generated, so the identical request can
+    simply be sent again. A real refusal from the model is left alone.
+    """
+    return msg.stop_reason == "refusal" and not msg.content and not (msg.usage.output_tokens or 0)
 
 
 def make_client(cfg: RunConfig) -> anthropic.Anthropic:
@@ -93,6 +104,7 @@ class RunStats:
     cache_read: int = 0
     cache_write: int = 0
     uploaded_files: list[str] = field(default_factory=list)
+    empty_refusals: int = 0
 
     def cost(self, model: str) -> float | None:
         p = PRICES.get(model)
@@ -119,6 +131,9 @@ class PaintingSession:
         self.canvas = Canvas(cfg.width, cfg.height, paper=cfg.paper, seed=cfg.seed)
         self.tools = tool_definitions(cfg.width, cfg.height)
         self.system = cfg.system_prompt.format(width=cfg.width, height=cfg.height, max_actions=cfg.max_actions)
+        if max(cfg.width, cfg.height) > cfg.view_size:
+            self.system += (f"\n\n(The canvas image you see is scaled down to fit {cfg.view_size} pixels. "
+                            f"Tool coordinates are always in canvas pixels, {cfg.width} by {cfg.height}.)")
         self.stats = RunStats()
         self.messages: list[Any] = []
         self.finished: dict[str, Any] | None = None
@@ -200,14 +215,20 @@ class PaintingSession:
             kwargs["fallbacks"] = "default"
         if not kwargs["betas"]:
             del kwargs["betas"]
-        with self.client.beta.messages.stream(**kwargs) as stream:
-            msg = stream.get_final_message()
-        u = msg.usage
-        self.stats.requests += 1
-        self.stats.input_tokens += u.input_tokens or 0
-        self.stats.output_tokens += u.output_tokens or 0
-        self.stats.cache_read += getattr(u, "cache_read_input_tokens", 0) or 0
-        self.stats.cache_write += getattr(u, "cache_creation_input_tokens", 0) or 0
+        for attempt in range(self.cfg.empty_refusal_retries + 1):
+            with self.client.beta.messages.stream(**kwargs) as stream:
+                msg = stream.get_final_message()
+            u = msg.usage
+            self.stats.requests += 1
+            self.stats.input_tokens += u.input_tokens or 0
+            self.stats.output_tokens += u.output_tokens or 0
+            self.stats.cache_read += getattr(u, "cache_read_input_tokens", 0) or 0
+            self.stats.cache_write += getattr(u, "cache_creation_input_tokens", 0) or 0
+            if not is_empty_refusal(msg) or attempt == self.cfg.empty_refusal_retries:
+                return msg
+            self.stats.empty_refusals += 1
+            self._log("empty_refusal_retry", attempt=attempt + 1)
+            time.sleep(min(2 ** attempt, 20))
         return msg
 
     # ------------------------------------------------------------------ loop
@@ -334,6 +355,7 @@ class PaintingSession:
             "note": (self.finished or {}).get("note"),
             "actions": self.stats.actions,
             "requests": self.stats.requests,
+            "empty_refusal_retries": self.stats.empty_refusals,
             "tokens": {
                 "input": self.stats.input_tokens,
                 "output": self.stats.output_tokens,

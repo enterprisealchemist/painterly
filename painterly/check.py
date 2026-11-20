@@ -14,7 +14,7 @@ from typing import Any, Callable
 import anthropic
 from PIL import Image
 
-from .agent import RunConfig, make_client
+from .agent import RunConfig, is_empty_refusal, make_client
 
 
 def _png_b64(color=(200, 40, 40)) -> str:
@@ -29,8 +29,26 @@ def _text(msg) -> str:
     return " ".join(b.text for b in msg.content if b.type == "text").strip()
 
 
+class _Retrying:
+    """Wraps create() to resend empty refusals, as a run would, and counts them."""
+
+    def __init__(self, create, tries):
+        self.create, self.tries, self.empty, self.total = create, tries, 0, 0
+
+    def __call__(self, **kw):
+        for i in range(self.tries + 1):
+            r = self.create(**kw)
+            self.total += 1
+            if not is_empty_refusal(r) or i == self.tries:
+                return r
+            self.empty += 1
+        return r
+
+
 def run_checks(cfg: RunConfig) -> dict[str, bool]:
-    client = make_client(cfg)
+    raw = make_client(cfg)
+    create = _Retrying(raw.messages.create, cfg.empty_refusal_retries)
+    beta_create = _Retrying(raw.beta.messages.create, cfg.empty_refusal_retries)
     m = cfg.model
     hi = [{"role": "user", "content": "Reply with the single word: ready"}]
     tool = {
@@ -48,14 +66,14 @@ def run_checks(cfg: RunConfig) -> dict[str, bool]:
     ]}]
 
     def basic():
-        return _text(client.messages.create(model=m, max_tokens=50, messages=hi))
+        return _text(create(model=m, max_tokens=50, messages=hi))
 
     def streaming():
-        with client.beta.messages.stream(model=m, max_tokens=50, messages=hi) as s:
+        with raw.beta.messages.stream(model=m, max_tokens=50, messages=hi) as s:
             return _text(s.get_final_message())
 
     def effort_thinking():
-        r = client.beta.messages.create(
+        r = beta_create(
             model=m, max_tokens=2000, messages=hi,
             thinking={"type": "adaptive", "display": "summarized"},
             output_config={"effort": cfg.effort},
@@ -64,7 +82,7 @@ def run_checks(cfg: RunConfig) -> dict[str, bool]:
         return f"blocks={kinds}"
 
     def tools():
-        r = client.messages.create(
+        r = create(
             model=m, max_tokens=500, tools=[tool],
             messages=[{"role": "user", "content": "Use the dab tool once, anywhere, any colour."}],
         )
@@ -74,23 +92,23 @@ def run_checks(cfg: RunConfig) -> dict[str, bool]:
         return f"dab({uses[0].input})"
 
     def image_base64():
-        r = client.messages.create(model=m, max_tokens=50, messages=image_msg(
+        r = create(model=m, max_tokens=50, messages=image_msg(
             {"type": "base64", "media_type": "image/png", "data": _png_b64()}))
         return _text(r)
 
     def files_api():
-        meta = client.files.upload(file=("probe.png", base64.b64decode(_png_b64((40, 60, 200))), "image/png"))
+        meta = raw.files.upload(file=("probe.png", base64.b64decode(_png_b64((40, 60, 200))), "image/png"))
         try:
-            r = client.messages.create(model=m, max_tokens=50, messages=image_msg({"type": "file", "file_id": meta.id}))
+            r = create(model=m, max_tokens=50, messages=image_msg({"type": "file", "file_id": meta.id}))
             return _text(r)
         finally:
             try:
-                client.files.delete(meta.id)
+                raw.files.delete(meta.id)
             except anthropic.APIError:
                 pass
 
     def context_editing():
-        r = client.beta.messages.create(
+        r = beta_create(
             model=m, max_tokens=50, messages=hi,
             betas=["context-management-2025-06-27"],
             context_management={"edits": [{
@@ -102,7 +120,7 @@ def run_checks(cfg: RunConfig) -> dict[str, bool]:
         return _text(r)
 
     def caching():
-        r = client.messages.create(model=m, max_tokens=50, messages=hi, cache_control={"type": "ephemeral"})
+        r = create(model=m, max_tokens=50, messages=hi, cache_control={"type": "ephemeral"})
         return _text(r)
 
     probes: list[tuple[str, Callable[[], Any], str]] = [
@@ -128,4 +146,9 @@ def run_checks(cfg: RunConfig) -> dict[str, bool]:
             print(f"  FAIL  {name:28s} {str(msg)[:110]}\n        -> {if_fail}")
             if name == "basic request":
                 break
+    total = create.total + beta_create.total
+    empty = create.empty + beta_create.empty
+    if empty:
+        print(f"\nnote: {empty} of {total} requests came back as an empty refusal (a bad backend at the "
+              f"provider) and were resent; runs do the same automatically, up to {cfg.empty_refusal_retries} times.")
     return results

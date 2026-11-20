@@ -31,6 +31,12 @@ python -m painterly run --model claude-haiku-5-5 --base-url ... --api-key-env MY
     # plus, if `check` says so: --inline-images --no-context-editing --no-thinking-summaries
 ```
 
+Some providers spread requests across several backends, and a bad backend may return an
+empty `refusal` (no content, zero output tokens) even for harmless requests. Requests that
+come back that way are resent automatically (`empty_refusal_retries` in `summary.json`).
+A real refusal from the model is not resent. On CometAPI with Haiku 5.5 (tested Nov 2026)
+everything works except the Files API, so add `--inline-images`.
+
 Each session writes to `runs/<timestamp>/`:
 
 | file | what |

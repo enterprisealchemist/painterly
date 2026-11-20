@@ -39,7 +39,8 @@ SCRIPT = [
 
 
 class FakeClient:
-    def __init__(self):
+    def __init__(self, script=None):
+        self.script = script or SCRIPT
         self.requests = []
         self.n = 0
         self.files = SimpleNamespace(upload=self._upload)
@@ -51,7 +52,7 @@ class FakeClient:
 
     def _stream(self, **kw):
         self.requests.append({**kw, "messages": list(kw["messages"])})
-        msg = SCRIPT[len(self.requests) - 1]
+        msg = self.script[len(self.requests) - 1]
 
         class Ctx:
             def __enter__(s):
@@ -99,3 +100,18 @@ def test_inline_images_without_optional_features(tmp_path):
     view = req["messages"][-1]["content"][-1]["content"][1]
     assert view["source"]["type"] == "base64"
     assert client.n == 0  # nothing went through the Files API
+
+
+def test_empty_refusals_are_resent(tmp_path, monkeypatch):
+    monkeypatch.setattr("painterly.agent.time.sleep", lambda s: None)
+    empty = BetaMessage.model_validate({
+        "id": "msg_r", "type": "message", "role": "assistant", "model": "x", "content": [],
+        "stop_reason": "refusal", "stop_sequence": None, "usage": {"input_tokens": 400, "output_tokens": 0},
+    })
+    client = FakeClient([empty, empty, SCRIPT[0], empty, SCRIPT[-1]])
+    run_dir = PaintingSession(RunConfig(out_dir=tmp_path, max_actions=10), client=client).run()
+    summary = json.loads((run_dir / "summary.json").read_text())
+    assert summary["finished"] and summary["actions"] == 2
+    assert summary["empty_refusal_retries"] == 3
+    # a resend is the identical request
+    assert client.requests[0]["messages"] == client.requests[2]["messages"]
