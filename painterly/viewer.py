@@ -50,7 +50,7 @@ def build_steps(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 steps.append({"frame": last_frame, "kind": tool, "stroke": ev.get("input"), "notes": pending})
                 pending = []
         elif k == "nudge":
-            pending.append({"type": "system", "text": "It ended a turn without painting or finishing, and was told the canvas was still open."})
+            pending.append({"type": "system", "text": "It ended a turn without making a stroke and was nudged to carry on."})
         elif k == "resumed":
             pending.append({"type": "system", "text": "The run stopped here and was resumed later."})
         elif k == "api_error":
@@ -100,7 +100,9 @@ def write_viewer(run_dir: Path, out: Path | None = None, max_side: int = 900) ->
         "steps": steps,
     }
     blob = json.dumps(data).replace("</", "<\\/")
-    title = data["meta"]["title"] or f"Painterly run {run_dir.name}"
+    stamp = run_dir.name
+    when = f"{stamp[:4]}-{stamp[4:6]}-{stamp[6:8]} {stamp[9:11]}:{stamp[11:13]}" if len(stamp) >= 13 else stamp
+    title = data["meta"]["title"] or (f"Open canvas {when}" if data["meta"]["open_ended"] else f"Painterly run {stamp}")
     html = _TEMPLATE.read_text().replace("__TITLE__", _esc(title)).replace("__DATA__", blob)
     out = out or run_dir / "viewer.html"
     out.write_text(html, encoding="utf-8")
