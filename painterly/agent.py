@@ -66,6 +66,7 @@ class RunConfig:
     height: int = 1024
     paper: str = "#f4f1ea"
     max_actions: int = 300  # where this session stops; the model isn't told. `resume --max-actions` goes on.
+    max_cost_usd: float | None = None  # stop the session (quietly, resumably) once the estimated cost passes this
     open_ended: bool = True  # no finish tool and no end point; False gives the model `finish`
     max_nudges: int = 2  # turns in a row without a stroke before the run ends
     keep_images: int = 4  # how many recent tool results (canvas views) stay in context
@@ -560,6 +561,11 @@ class PaintingSession:
                         force = True
                     self.messages.append({"role": "user", "content": content})
                 self._commit()
+                cost = self.stats.cost(self.cfg.model)
+                if self.cfg.max_cost_usd and cost is not None and cost >= self.cfg.max_cost_usd:
+                    self._log("session_cap", actions=self.stats.actions, reason="cost", cost=cost)
+                    say(f"stopped at the cost cap (${cost:.3f} of ${self.cfg.max_cost_usd})")
+                    break
                 if self.cfg.open_ended and self.stats.actions >= self.cfg.max_actions:
                     # The session stops here without telling the model; `resume --max-actions`
                     # carries on from exactly this point.

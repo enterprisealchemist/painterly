@@ -24,6 +24,7 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--critic-every", type=int, default=RunConfig.critic_every,
                    help="the critic also looks after every N strokes, unasked (0: only when shown)")
     r.add_argument("--critic-model", help="model for the critic (default: the painter's model)")
+    r.add_argument("--max-cost", type=float, help="stop the session once its estimated cost passes this many USD (resumable)")
     r.add_argument("--finish", action="store_true",
                    help="give the model a finish tool and tell it to call it when done (default: open-ended)")
     r.add_argument("--keep-images", type=int, default=RunConfig.keep_images, help="recent canvas views kept in context")
@@ -55,6 +56,7 @@ def main(argv: list[str] | None = None) -> int:
 
     rs = sub.add_parser("resume", help="carry on a run that stopped before the model finished")
     rs.add_argument("run_dir", type=Path)
+    rs.add_argument("--max-cost", type=float, help="new cost cap in USD for the resumed session")
     rs.add_argument("--max-actions", type=int, help="raise the session's stroke cap to keep an open-ended painting going")
 
     v = sub.add_parser("viewer", help="write a self-contained HTML page to step through a run's strokes")
@@ -80,6 +82,8 @@ def main(argv: list[str] | None = None) -> int:
         from .agent import PaintingSession
 
         session = PaintingSession.resume(a.run_dir, max_actions=a.max_actions)
+        if a.max_cost:
+            session.cfg.max_cost_usd = a.max_cost
         out = session.run(on_event=lambda s: print("  " + s, flush=True))
         print((out / "summary.json").read_text())
         return 0
@@ -132,6 +136,7 @@ def main(argv: list[str] | None = None) -> int:
             critic=not a.no_critic,
             critic_model=a.critic_model,
             critic_every=a.critic_every,
+            max_cost_usd=a.max_cost,
             allow_look=not a.no_look,
             view_size=a.view_size or (768 if a.inline_images else 1024),
             **({"system_prompt": a.prompt.read_text()} if a.prompt else {}),

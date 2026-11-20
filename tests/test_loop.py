@@ -407,3 +407,25 @@ def test_show_alone_is_not_a_turn_and_show_with_a_stroke_sees_it(tmp_path):
     back = client.requests[5]["messages"][-1]["content"]
     assert [b["tool_use_id"] for b in back] == ["sh2", "t2"]  # answered in the order asked
     assert "tool_choice" not in client.requests[5]
+
+
+def test_cost_cap_stops_the_session(tmp_path):
+    strokes = [_msg([_brush(i)]) for i in range(1, 6)]
+    client = FakeClient(strokes)
+    cfg = RunConfig(out_dir=tmp_path, model="claude-haiku-5-5", max_cost_usd=0.0002, critic_every=0)
+    run_dir = PaintingSession(cfg, client=client).run()
+    # each fake request costs 1000*0.10/1e6 + 200*0.50/1e6 = $0.0002
+    assert json.loads((run_dir / "summary.json").read_text())["actions"] == 1 and len(client.requests) == 1
+
+
+def test_watch_reports_progress_critiques_and_the_end(tmp_path, capsys):
+    from painterly.watch import watch
+
+    evs = [{"kind": "tool", "tool": "brush"}] * 2 + [{"kind": "reminder"}] * 3 + [
+        {"kind": "critique", "stroke": 2, "asked": False, "text": "Lots of blue."},
+        {"kind": "api_error", "message": "boom"}, {"kind": "session_cap"}]
+    (tmp_path / "events.jsonl").write_text("".join(json.dumps(e) + "\n" for e in evs))
+    watch(tmp_path, every=2, from_start=True)
+    out = capsys.readouterr().out
+    assert "stroke 2:" in out and "LOOP? 3 reminders" in out and "critic @2 (unasked)" in out
+    assert "ERROR api_error: boom" in out and out.strip().splitlines()[-1].startswith("ENDED (session_cap)")

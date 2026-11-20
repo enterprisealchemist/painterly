@@ -20,6 +20,7 @@ python -m painterly sampler -o brushes.png  # brush reference sheet, no API call
 python -m painterly resume runs/<id>        # carry on a run that stopped early
 python -m painterly viewer runs/<id>        # HTML page to step through it, stroke by stroke
 python -m painterly replay runs/<id>        # re-render a run from its log
+python -m painterly.watch runs/<id>         # follow a live run: progress, critiques, errors, loops, stalls
 ```
 
 Runs are resumable. After every turn the conversation (`conversation.jsonl`, with inline
