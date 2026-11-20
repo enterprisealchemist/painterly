@@ -35,6 +35,10 @@ def build_steps(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if k in ("thinking", "text"):
             if ev.get("text", "").strip():
                 pending.append({"type": k, "text": ev["text"].strip()})
+        elif k == "critique":
+            pending.append({"type": "critique", "message": ev.get("message"), "text": ev.get("text", "")})
+        elif k == "critic_error":
+            pending.append({"type": "system", "text": "It tried to show the canvas to the critic, who couldn't be reached."})
         elif k == "tool_error":
             pending.append({"type": "refused", "tool": ev.get("tool"), "input": ev.get("input"), "error": ev.get("error")})
         elif k == "tool_crash":
@@ -89,6 +93,8 @@ def write_viewer(run_dir: Path, out: Path | None = None, max_side: int = 900) ->
             "system_prompt": cfg.get("system_prompt_rendered"),
             "finished": summary.get("finished"),
             "open_ended": summary.get("open_ended", False),
+            "critic": cfg.get("critic", False),
+            "critic_prompt": cfg.get("critic_prompt_rendered"),
             "title": summary.get("title"),
             "note": summary.get("note"),
             "strokes": summary.get("actions"),

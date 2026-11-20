@@ -80,6 +80,7 @@ continue it. With `--finish`, the model can also end it by calling `finish`.
 | tool | does |
 |---|---|
 | `brush` | one brushstroke: touch down, move, lift off |
+| `show` | show the canvas to the critic and get its feedback (`--no-critic` removes it) |
 | `look` | lean in and look closely at a region (doesn't change the canvas; `--no-look` removes it) |
 | `undo` | off by default, so every stroke is final; `--undo` adds it |
 | `finish` | only with `--finish`: end the session, with an optional title and note |
@@ -157,6 +158,13 @@ and easy to change:
   "(The painting continues.)". The model isn't told either way, and `resume --max-actions`
   carries on from exactly that point. `--finish` brings back the old mode, where the model
   decides when it's done.
+- **A critic.** Whenever it wants, the painter can `show` the canvas, optionally with a
+  message, to a separate critic conversation. The critic is the same model by default
+  (`--critic-model` to change it), with its own prompt: say what you see, what's working,
+  and where it could be stronger, without prescribing a subject. The critic sees only the
+  canvas, the painter's message and its own earlier notes, never the painter's thinking.
+  Its reply comes back as the result of the `show` call, so the painter reads it on its
+  next turn. `--no-critic` removes it.
 - **Compose something.** Abstraction is welcome, but the prompt asks for expression, with
   the strokes working together, rather than random marks.
 - **A coverage expectation, not a target.** The prompt says most of the canvas will

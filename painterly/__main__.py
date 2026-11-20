@@ -20,6 +20,8 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--paper", default=RunConfig.paper, help="paper colour (hex)")
     r.add_argument("--max-actions", type=int, default=RunConfig.max_actions,
                    help="where this session stops (default 300); the model isn't told. Resume to go on.")
+    r.add_argument("--no-critic", action="store_true", help="no critic to show the canvas to")
+    r.add_argument("--critic-model", help="model for the critic (default: the painter's model)")
     r.add_argument("--finish", action="store_true",
                    help="give the model a finish tool and tell it to call it when done (default: open-ended)")
     r.add_argument("--keep-images", type=int, default=RunConfig.keep_images, help="recent canvas views kept in context")
@@ -125,6 +127,8 @@ def main(argv: list[str] | None = None) -> int:
             wobble=a.wobble,
             mixing=a.mixing,
             open_ended=not a.finish,
+            critic=not a.no_critic,
+            critic_model=a.critic_model,
             allow_look=not a.no_look,
             view_size=a.view_size or (768 if a.inline_images else 1024),
             **({"system_prompt": a.prompt.read_text()} if a.prompt else {}),

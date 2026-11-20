@@ -37,7 +37,31 @@ welcome, but art is expression, not random squiggles. Let the strokes come to wo
 together and say something.
 
 A stroke can be as large, long or intricate as you like. You simply see each one land \
-before you make the next."""
+before you make the next.
+
+Whenever you want an outside eye, you can show the canvas to a critic with `show`."""
+
+CRITIC_PROMPT = """\
+You are a painting critic and mentor. A painter is working on a canvas, {width} by {height} \
+pixels, one brushstroke at a time with digital brushes: round, ink, bristle, flat, knife, \
+watercolor, airbrush, charcoal, spatter, and a blender that softens paint already down. A \
+stroke can run through several points, vary its pressure along its length, be wet enough to \
+pick up and drag paint that's already on the canvas, and, with the flat, ink and knife, be \
+held at a fixed angle like a calligraphy nib. Paint mixes like real pigment. The painting \
+has no subject or brief, abstraction is welcome, and it is open-ended: it can keep \
+developing indefinitely.
+
+From time to time the painter shows you the canvas, sometimes with a few words. Respond as \
+a thoughtful, honest critic, writing directly to the painter:
+- Say what you actually see: the marks, colours and shapes, where the eye goes, what it \
+evokes. Name places on the canvas ("the upper left", "the dark diagonal") so the painter \
+can find them.
+- Say what's working and why.
+- Say candidly where it could be stronger: composition, balance, colour, value, texture, \
+variety of mark, areas that feel unresolved or empty, and what the painting seems to want.
+
+Don't prescribe a subject, and don't dictate stroke by stroke; point to possibilities. \
+Keep it to about 200 words."""
 
 # For --finish runs (and runs from before open-ended painting): the model may end the session.
 FINISH_PROMPT_ADDENDUM = "\n\nWhen you feel it's finished, call `finish`."
@@ -87,6 +111,8 @@ class RunConfig:
     allow_undo: bool = False  # every stroke is final, as on a real canvas
     allow_look: bool = True
     one_call_per_turn: bool = True  # brush, see the canvas, repeat
+    critic: bool = True  # the painter can `show` the canvas to a separate critic conversation
+    critic_model: str | None = None  # default: the painter's model
     empty_refusal_retries: int = 6
     transient_retries: int = 8  # resend after mid-stream overload/unavailable errors
     mixing: str = "pigment"  # "pigment": paint mixes like pigment (blue + yellow = green); "rgb": like light
@@ -181,7 +207,7 @@ class PaintingSession:
                              wobble=cfg.wobble)
         cfg.max_stroke_length, cfg.max_brush_size = self.limits.max_stroke_length, self.limits.max_brush_size
         self.tools = tool_definitions(cfg.width, cfg.height, self.limits, undo=cfg.allow_undo, look=cfg.allow_look,
-                                      finish=not cfg.open_ended)
+                                      finish=not cfg.open_ended, show=cfg.critic)
         self.tool_names = {t["name"] for t in self.tools}
         self.system = cfg.system_prompt.format(width=cfg.width, height=cfg.height, max_actions=cfg.max_actions)
         if not cfg.open_ended and cfg.system_prompt == DEFAULT_SYSTEM_PROMPT:
@@ -194,6 +220,7 @@ class PaintingSession:
         self.finished: dict[str, Any] | None = None
         self._seed_counter = cfg.seed * 1_000_003
         self._view_paths: dict[str, str] = {}  # sha1 of base64 data -> file under views/
+        self.critiques: list[dict[str, Any]] = []  # the critic's memory: what it was shown and said
         self._committed = 0  # messages already in conversation.jsonl
         self._event_count = 0
         self.resumed = _resume_dir is not None
@@ -210,6 +237,8 @@ class PaintingSession:
         (self.dir / "conversation.jsonl").write_text("")
         meta = {k: (str(v) if isinstance(v, Path) else v) for k, v in cfg.__dict__.items()}
         meta["system_prompt_rendered"] = self.system
+        if cfg.critic:
+            meta["critic_prompt_rendered"] = CRITIC_PROMPT.format(width=cfg.width, height=cfg.height)
         (self.dir / "config.json").write_text(json.dumps(meta, indent=2))
 
     # ------------------------------------------------------------------ resume
@@ -253,6 +282,8 @@ class PaintingSession:
             ev = json.loads(line)
             if ev["kind"] == "tool" and ev["tool"] in MARKING_TOOLS:
                 apply_tool(self.canvas, ev["tool"], ev["input"], ev["seed"], self.limits)
+        self.critiques = [{"stroke": ev.get("stroke"), "message": ev.get("message"), "text": ev["text"]}
+                          for ev in map(json.loads, lines) if ev["kind"] == "critique"]
         for f in (self.dir / "frames").glob("*.png"):
             if int(f.stem) > self.stats.actions:
                 f.unlink()
@@ -386,7 +417,7 @@ class PaintingSession:
                         "type": "clear_tool_uses_20250919",
                         "trigger": {"type": "input_tokens", "value": self.cfg.clear_trigger_tokens},
                         "keep": {"type": "tool_uses", "value": self.cfg.keep_images},
-                        "exclude_tools": ["finish"],
+                        "exclude_tools": ["finish", "show"],  # keep the critic's words
                     }
                 ]
             }
@@ -395,6 +426,10 @@ class PaintingSession:
             kwargs["fallbacks"] = "default"
         if not kwargs["betas"]:
             del kwargs["betas"]
+        return self._call(kwargs)
+
+    def _call(self, kwargs: dict[str, Any]):
+        """Send one request, resending after transient errors and empty refusals."""
         empty = transient = 0
         while True:
             try:
@@ -423,6 +458,37 @@ class PaintingSession:
             self.stats.empty_refusals += 1
             self._log("empty_refusal_retry", attempt=empty)
             time.sleep(min(2 ** (empty - 1), 20))
+
+    # ------------------------------------------------------------------ critic
+    def _critique(self, message: str | None) -> str:
+        """Show the canvas to the critic, a separate conversation that never sees the painter's
+        thinking: only the canvas, what the painter chose to say, and its own earlier notes."""
+        cfg = self.cfg
+        intro = []
+        if self.critiques:
+            earlier = "\n\n".join(f"After stroke {c['stroke']}:\n{c['text']}" for c in self.critiques[-3:])
+            intro.append({"type": "text", "text": f"What you said the last time(s) you saw this painting:\n\n{earlier}"})
+        view = self._image_block(self.canvas.image(), f"critic-{self.stats.actions:04d}-{len(self.critiques)}")
+        said = f'The painter says: "{message.strip()}"' if message and message.strip() else "The painter doesn't say anything."
+        content = intro + [view, {"type": "text", "text": f"The canvas after {self.stats.actions} strokes. {said}"}]
+        kwargs: dict[str, Any] = dict(
+            model=cfg.critic_model or cfg.model,
+            max_tokens=16_000,
+            system=CRITIC_PROMPT.format(width=cfg.width, height=cfg.height),
+            messages=[{"role": "user", "content": content}],
+            output_config={"effort": cfg.effort},
+        )
+        if cfg.thinking_summaries:
+            kwargs["thinking"] = {"type": "adaptive", "display": "summarized"}
+        msg = self._call(kwargs)
+        text = " ".join(b.text for b in msg.content if b.type == "text").strip()
+        if not text:
+            text = "(The critic looked but had nothing to say this time.)"
+        self.critiques.append({"stroke": self.stats.actions, "message": message, "text": text})
+        self._log("critique", stroke=self.stats.actions, message=message, text=text)
+        self._journal_write(f"**Shown to the critic**" + (f": \"{message.strip()}\"" if message else "") +
+                            "\n\n" + "\n".join("> " + ln for ln in text.splitlines()) + "\n\n")
+        return text
 
     # ------------------------------------------------------------------ loop
     def run(self, on_event=None) -> Path:
@@ -530,6 +596,16 @@ class PaintingSession:
                                 "content": "This session can't take any more strokes. Call `finish` when you're ready."})
                 continue
             acted = True
+            if tu.name == "show":
+                msg_in = (tu.input or {}).get("message") if isinstance(tu.input, dict) else None
+                say("shown to the critic")
+                try:
+                    reply = self._critique(msg_in if isinstance(msg_in, str) else None)
+                except anthropic.APIError as e:
+                    self._log("critic_error", error=str(e)[:300])
+                    reply = "The critic couldn't be reached just now. Nothing was said."
+                results.append({"type": "tool_result", "tool_use_id": tu.id, "content": f"The critic says:\n\n{reply}"})
+                continue
             self._seed_counter += 1
             try:
                 out = apply_tool(self.canvas, tu.name, tu.input, self._seed_counter, self.limits)
@@ -581,6 +657,7 @@ class PaintingSession:
         summary = {
             "finished": self.finished is not None,
             "open_ended": self.cfg.open_ended,
+            "critiques": len(self.critiques),
             "title": (self.finished or {}).get("title"),
             "note": (self.finished or {}).get("note"),
             "actions": self.stats.actions,

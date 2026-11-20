@@ -85,7 +85,7 @@ def test_full_loop(tmp_path):
 
     # one call per turn, asked of the API and enforced locally
     assert client.requests[0]["tool_choice"] == {"type": "auto", "disable_parallel_tool_use": True}
-    assert [t["name"] for t in client.requests[0]["tools"]] == ["brush", "look", "undo", "finish"]
+    assert [t["name"] for t in client.requests[0]["tools"]] == ["brush", "look", "undo", "show", "finish"]
     first = client.requests[1]["messages"][-1]["content"]
     assert first[1]["is_error"] and "only the first call" in first[1]["content"]
     assert [b["type"] for b in first[0]["content"]] == ["text", "image"]  # view after the stroke, no countdown
@@ -123,7 +123,7 @@ def test_no_undo_no_look(tmp_path):
     cfg = RunConfig(open_ended=False, out_dir=tmp_path, allow_look=False)  # undo is off by default
     PaintingSession(cfg, client=client).run()
     tools = client.requests[0]["tools"]
-    assert [t["name"] for t in tools] == ["brush", "finish"]
+    assert [t["name"] for t in tools] == ["brush", "show", "finish"]
     assert "px long" not in tools[0]["description"]  # no length limit by default
     assert tools[0]["input_schema"]["properties"]["points"]["maxItems"] == 7
 
@@ -317,7 +317,7 @@ def test_open_ended_has_no_finish_and_stops_quietly_at_the_cap(tmp_path, monkeyp
     client = FakeClient(strokes[:3])
     run_dir = PaintingSession(RunConfig(out_dir=tmp_path, max_actions=3, inline_images=True), client=client).run()
     req = client.requests[0]
-    assert [t["name"] for t in req["tools"]] == ["brush", "look"]
+    assert [t["name"] for t in req["tools"]] == ["brush", "look", "show"]
     assert "finish" not in req["system"] and "indefinitely" in req["system"]
     sent = json.dumps([r["messages"] for r in client.requests], default=str).lower()
     assert "finish" not in sent and "left" not in sent
@@ -340,3 +340,30 @@ def test_open_ended_nudges_then_stops_when_it_stops_painting(tmp_path):
     assert nudges  # neutral nudge, no mention of finishing
     assert json.loads((run_dir / "summary.json").read_text())["actions"] == 2
     assert len(client.requests) == 6  # one pause forgiven; then two nudges in a row and it ends
+
+
+def test_show_asks_a_separate_critic(tmp_path):
+    critique = _msg([{"type": "thinking", "thinking": "critic thoughts", "signature": "c"},
+                     {"type": "text", "text": "The blue diagonal anchors it; the lower right feels empty."}], stop="end_turn")
+    critique2 = _msg([{"type": "text", "text": "Better: the lower right now answers the diagonal."}], stop="end_turn")
+    show = lambda i, m: _msg([{"type": "tool_use", "id": f"s{i}", "name": "show", "input": {"message": m}}])  # noqa: E731
+    script = [_msg([_brush(1)]), show(1, "Does this hold together?"), critique,
+              _msg([_brush(2, points=[[700, 800], [900, 900]])]), show(2, ""), critique2,
+              _msg([_brush(3)])]
+    client = FakeClient(script)
+    run_dir = PaintingSession(RunConfig(out_dir=tmp_path, max_actions=3, inline_images=True), client=client).run()
+
+    critic_req = client.requests[2]
+    assert "tools" not in critic_req and "critic" in critic_req["system"]
+    content = critic_req["messages"][0]["content"]
+    assert content[0]["type"] == "image" and 'Does this hold together?' in content[1]["text"]
+    assert "Starting with a wash" not in json.dumps(critic_req["messages"], default=str)  # never sees the painter's words to itself
+    # the painter gets the critique as the result of its show call, on its next turn
+    back = client.requests[3]["messages"][-1]["content"][0]
+    assert back["tool_use_id"] == "s1" and "lower right feels empty" in back["content"]
+    # second critique remembers the first
+    second = json.dumps(client.requests[5]["messages"], default=str)
+    assert "lower right feels empty" in second and "doesn't say anything" in second
+    assert json.loads((run_dir / "summary.json").read_text())["actions"] == 3
+    events = [json.loads(line) for line in (run_dir / "events.jsonl").read_text().splitlines()]
+    assert [e["stroke"] for e in events if e["kind"] == "critique"] == [1, 2]

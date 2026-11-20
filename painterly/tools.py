@@ -29,7 +29,7 @@ class Limits:
 
 
 def tool_definitions(width: int, height: int, limits: Limits | None = None, undo: bool = True, look: bool = True,
-                     finish: bool = True) -> list[dict[str, Any]]:
+                     finish: bool = True, show: bool = False) -> list[dict[str, Any]]:
     lim = limits or Limits.for_canvas(width, height)
     coord = f"Canvas pixels: x 0..{width} left to right, y 0..{height} top to bottom."
     tools: list[dict[str, Any]] = [
@@ -116,6 +116,21 @@ def tool_definitions(width: int, height: int, limits: Limits | None = None, undo
             "input_schema": {
                 "type": "object",
                 "properties": {"steps": {"type": "integer", "description": "How many strokes to undo. Default 1."}},
+                "additionalProperties": False,
+            },
+            "eager_input_streaming": True,
+        })
+    if show:
+        tools.append({
+            "name": "show",
+            "description": (
+                "Show the painting as it is now to a critic. They'll look at the canvas and reply "
+                "with what they see, what's working and where it could be stronger. Their reply "
+                "comes back as this call's result. Use it whenever you want an outside eye. It "
+                "doesn't change the canvas."),
+            "input_schema": {
+                "type": "object",
+                "properties": {"message": {"type": "string", "description": "Optional: anything you want to say or ask about it."}},
                 "additionalProperties": False,
             },
             "eager_input_streaming": True,

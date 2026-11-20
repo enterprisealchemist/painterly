@@ -95,6 +95,9 @@ label.toggle { display: inline-flex; gap: 7px; align-items: center; cursor: poin
 .note.refused { background: var(--refused-soft); border-radius: 4px; padding: 10px 12px; }
 .note.refused .label { color: var(--refused); }
 .note.refused p { margin: 0; }
+.note.critique { border: 1px solid var(--line); border-radius: 4px; padding: 12px 14px; gap: 8px; }
+.note.critique .asked { margin: 0; font-size: 14px; }
+.note.critique .reply { margin: 0; white-space: pre-wrap; font-size: 14.5px; padding-left: 12px; border-left: 2px solid var(--accent); }
 .note.system p, .note.look p { margin: 0; color: var(--muted); font-size: 14px; }
 .none { color: var(--muted); font-size: 14px; margin: 0; }
 
@@ -152,6 +155,7 @@ details.brief p { margin: 10px 0 0; color: var(--muted); font-size: 14px; }
     <summary>What it was told</summary>
     <pre id="prompt"></pre>
     <p id="limits"></p>
+    <div id="criticBrief" hidden><p><strong>What the critic was told</strong></p><pre id="criticPrompt"></pre></div>
   </details>
 </div>
 
@@ -178,8 +182,9 @@ details.brief p { margin: 10px 0 0; color: var(--muted); font-size: 14px; }
   if (M.cost != null) meta.push(["Cost", "$" + Number(M.cost).toFixed(4)]);
   $("meta").innerHTML = meta.map(([k, v]) => `<span>${esc(k)} <b>${esc(v)}</b></span>`).join("");
   $("prompt").textContent = M.system_prompt || "";
+  if (M.critic_prompt) { $("criticPrompt").textContent = M.critic_prompt; $("criticBrief").hidden = false; }
   $("limits").textContent =
-    `Tools: brush${M.undo ? ", undo" : ""}, look${M.open_ended ? "" : ", finish"}. One stroke per turn; ` +
+    `Tools: brush${M.undo ? ", undo" : ""}, look${M.critic ? ", show (to a critic)" : ""}${M.open_ended ? "" : ", finish"}. One stroke per turn; ` +
     (M.max_stroke_length ? `the longest stroke ${M.max_stroke_length} px, ` : "no limit on stroke length, ") +
     `the widest brush ${M.max_brush_size} px, hand wobble ${M.wobble ? "on" : "off"}. ` +
     `A safety cap of ${M.max_actions} strokes${/up to \d+ strokes/.test(M.system_prompt || "") ? "" : ", which it wasn't told about"}.`;
@@ -285,6 +290,13 @@ details.brief p { margin: 10px 0 0; color: var(--muted); font-size: 14px; }
           : `from ${esc(JSON.stringify(inp.start))} to ${esc(JSON.stringify(inp.end))}`;
         const what = n.tool === "brush" ? `${esc(inp.brush ?? "?")} ${where}, size ${esc(inp.size)}` : esc(n.tool);
         return `<div class="note refused"><span class="label">Refused · nothing painted</span><p>${what}</p><p>${esc(n.error)}</p></div>`;
+      }
+      if (n.type === "critique") {
+        const asked = n.message && n.message.trim()
+          ? `<p class="asked">It showed the canvas and said: “${esc(n.message.trim())}”</p>`
+          : `<p class="asked">It showed the canvas without a word.</p>`;
+        return `<div class="note critique"><span class="label">Shown to the critic</span>${asked}
+          <span class="label">The critic replied</span><p class="reply">${esc(n.text)}</p></div>`;
       }
       if (n.type === "look") {
         const i = n.input || {};
