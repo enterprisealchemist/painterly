@@ -1,11 +1,11 @@
 # painterly
 
-A blank canvas for an AI agent. The model gets a set of brushes as tools and sees the
-canvas after every mark it makes. It isn't given a subject, a style or a goal, and it
+A blank canvas for an AI agent. The model paints the way a person does: one brushstroke
+at a time, looking at the canvas after each one. It isn't given a subject, a style or a goal, and it
 decides for itself when the work is finished. The question is what it makes when the
 choice is entirely its own.
 
-![every brush, with and without paint running out](docs/brush_sampler.png)
+![every brush: pressing in and lifting off, a steady arc, and an arc running dry](docs/brush_sampler.png)
 
 ## Quick start
 
@@ -13,7 +13,7 @@ choice is entirely its own.
 pip install -e .            # or: pip install -r requirements.txt
 export ANTHROPIC_API_KEY=... # or `ant auth login`
 
-python -m painterly run                     # one session, 150 actions max
+python -m painterly run                     # one session, 150 strokes max
 python -m painterly run --runs 5 --seed 10  # five independent sessions
 python -m painterly sampler -o brushes.png  # brush reference sheet, no API calls
 python -m painterly replay runs/<id>        # re-render a run from its log
@@ -64,22 +64,43 @@ without acting twice in a row (it gets one neutral nudge first).
 
 | tool | does |
 |---|---|
-| `stroke` | drag a brush through points; the path is smoothed into a curve |
-| `fill` | paint a polygon or the whole canvas, flat or as a gradient, with optional texture |
-| `soften` | blur a region, like blending wet paint |
-| `look` | zoom in on a region (doesn't change the canvas) |
-| `undo` | take back recent actions |
+| `brush` | one brushstroke: touch down, move, lift off |
+| `look` | lean in and look closely at a region (doesn't change the canvas; `--no-look` removes it) |
+| `undo` | take back recent strokes (`--no-undo` makes every stroke final) |
 | `finish` | end the session, with an optional title and note |
 
-Every `stroke` takes `size`, `opacity`, `hardness`, `taper_in`/`taper_out` (swelling from
-and thinning to a point), `fade` (paint running out along the stroke), `jitter` (hand
-wobble) and `blend` (`normal`, `multiply`, `screen`, `erase`).
+There's no fill, no shapes and no way to send a path. A `brush` call takes:
+
+| parameter | |
+|---|---|
+| `brush` | which brush (below) |
+| `start`, `end` | where the brush touches down and lifts off |
+| `curvature` | -1 to 1: straight, or a single smooth arc bowing left (+) or right (-) of the direction of travel |
+| `pressure` | 1–12 values spaced evenly along the stroke, eased smoothly between. Sets the width and how much paint goes down. `[0.2, 1, 0.3]` presses in and lifts off |
+| `size` | width at full pressure |
+| `color` | hex |
+| `load` | optional: how much paint is on the brush; less, and it runs dry toward the end |
+| `dilution` | optional: how thinned the paint is (more transparent) |
+
+**Limits.**
+- **Turns.** The model makes one call per turn. This is asked of the API with
+  `disable_parallel_tool_use` and also enforced by the loop, and it sees the canvas after
+  every stroke.
+- **Stroke length.** A stroke can be at most 40% of the canvas's longer side along its arc
+  (410 px on 1024), like a stroke from the wrist or elbow, not a printer sweep.
+- **Brush size.** The widest brush is 15% of the canvas's longer side (154 px).
+- **Errors.** A call that breaks a limit is refused with an explanation, and nothing is
+  painted.
+- **Changing them.** Use `--max-stroke-length` and `--max-brush-size`.
 
 ### Brushes
 
-`round`, `ink`, `bristle`, `flat`, `knife`, `watercolor`, `airbrush`, `charcoal`, `spatter`.
-See the sheet above: the top row of each pair is a fully loaded brush and the bottom row
-has `fade=0.9`.
+`round`, `ink`, `bristle`, `flat`, `knife`, `watercolor`, `airbrush`, `charcoal`, `spatter`,
+and `blender`, a clean dry brush that softens the paint it passes over. Each row of the
+sheet above shows one brush:
+- **Left:** straight, pressing in and lifting off.
+- **Middle:** an arc at steady pressure.
+- **Right:** an arc the other way, with pressure fading and little paint loaded.
 
 Strokes are rendered as continuous sweeps, not rows of stamps. Each pixel near a stroke
 knows how far along the stroke it is, how far across, and how much paint is left. Each
@@ -87,6 +108,8 @@ brush is a function of those values. Bristle and flat brushes give each bristle 
 lane and its own paint supply, so a dry brush breaks into streaks. Grain-sensitive brushes
 (charcoal, knife, watercolor) all read the same paper texture, so their marks line up. To
 add a brush, add a `BrushSpec` and one branch in `Canvas._sweep` (`painterly/canvas.py`).
+The engine still has free-form paths, polygon fills and region blur. The model can't reach
+them; they're kept so older runs can be replayed.
 
 ## Design choices that affect the result
 
@@ -105,7 +128,9 @@ and easy to change:
 - **Memory is short-term.** Only the last few canvas views stay in context (`--keep-images`,
   via server-side context editing), along with all of its own words and tool calls. Like a
   painter, it sees the canvas as it is now, not every earlier state.
-- **Undo exists.** Remove it from `tool_definitions` if you want every mark to be final.
+- **It paints like a person.** One stroke per turn, with no fills or shapes, and strokes
+  only as long as an arm can sweep. It has to build up every area mark by mark.
+- **Undo exists.** Use `--no-undo` if you want every mark to be final.
 - **Run it many times.** One painting is an anecdote. With `--runs N` you can look for what
   recurs across sessions: subjects, palettes, compositions, and when it decides to stop.
 
@@ -117,7 +142,7 @@ and easy to change:
   another model and the event is logged. Turn this off with `--no-fallbacks`.
 - Canvas views are uploaded through the Files API and referenced by id, with a two-day
   expiry, so request size stays flat over a long session.
-- Cost: each canvas view is roughly 1.4k input tokens. A rough estimate, not yet measured,
+- Cost: each canvas view is roughly 1.4k input tokens, and every stroke is a request. A rough estimate, not yet measured,
   is $3–15 for a full 150-action session at `high` effort, mostly thinking output and
   resent history. `summary.json` gives the figure for each run, so run one session before
   starting a batch. `--max-actions` and `--effort` are the main controls.

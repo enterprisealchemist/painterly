@@ -15,7 +15,7 @@ import anthropic
 from PIL import Image
 
 from .canvas import Canvas
-from .tools import MARKING_TOOLS, ToolError, apply_tool, tool_definitions
+from .tools import MARKING_TOOLS, Limits, ToolError, apply_tool, tool_definitions
 
 DEFAULT_SYSTEM_PROMPT = """\
 You have a blank canvas, {width} by {height} pixels, and a set of brushes.
@@ -24,8 +24,8 @@ Nothing is being asked of you. There is no brief, no client and no one to please
 You can paint anything you like, in any way you like, or nothing at all. You decide \
 what this is and when it's finished; that includes stopping right away.
 
-After each action you'll see the canvas as it is now. You have up to {max_actions} \
-actions. When you're done, call `finish`.
+You paint one stroke at a time, and after each stroke you'll see the canvas as it is \
+now. You have up to {max_actions} strokes. When you're done, call `finish`.
 
 For transparency: this is an experiment by someone curious what you'd make when the \
 choice is entirely yours. The canvas, your tool calls and anything you write along the \
@@ -70,7 +70,13 @@ class RunConfig:
     context_editing: bool = True  # server-side clearing of old canvas views
     thinking_summaries: bool = True  # ask for readable thinking summaries for the journal
     view_size: int = 1024  # longest side of the canvas image the model sees
-    empty_refusal_retries: int = 6  # resend when a backend returns an empty "refusal" (see is_empty_refusal)
+    max_stroke_length: float | None = None  # px along the arc; default 40% of the longer side
+    max_brush_size: float | None = None  # px; default 15% of the longer side
+    allow_undo: bool = True
+    allow_look: bool = True
+    one_call_per_turn: bool = True  # brush, see the canvas, repeat
+    empty_refusal_retries: int = 6
+    transient_retries: int = 8  # resend after mid-stream overload/unavailable errors  # resend when a backend returns an empty "refusal" (see is_empty_refusal)
 
 
 def is_empty_refusal(msg) -> bool:
@@ -81,6 +87,15 @@ def is_empty_refusal(msg) -> bool:
     simply be sent again. A real refusal from the model is left alone.
     """
     return msg.stop_reason == "refusal" and not msg.content and not (msg.usage.output_tokens or 0)
+
+
+def _is_transient(e: Exception) -> bool:
+    if isinstance(e, anthropic.APIConnectionError):
+        return True
+    status = getattr(e, "status_code", None)
+    text = str(getattr(e, "message", "") or e).lower()
+    return (status in (408, 409, 429) or (status or 0) >= 500 or "overloaded" in text
+            or "temporarily unavailable" in text or "try again" in text)
 
 
 def make_client(cfg: RunConfig) -> anthropic.Anthropic:
@@ -105,6 +120,7 @@ class RunStats:
     cache_write: int = 0
     uploaded_files: list[str] = field(default_factory=list)
     empty_refusals: int = 0
+    transient_errors: int = 0
 
     def cost(self, model: str) -> float | None:
         p = PRICES.get(model)
@@ -129,7 +145,11 @@ class PaintingSession:
         self.cfg = cfg
         self.client = client or make_client(cfg)
         self.canvas = Canvas(cfg.width, cfg.height, paper=cfg.paper, seed=cfg.seed)
-        self.tools = tool_definitions(cfg.width, cfg.height)
+        lim = Limits.for_canvas(cfg.width, cfg.height)
+        self.limits = Limits(cfg.max_stroke_length or lim.max_stroke_length, cfg.max_brush_size or lim.max_brush_size)
+        cfg.max_stroke_length, cfg.max_brush_size = self.limits.max_stroke_length, self.limits.max_brush_size
+        self.tools = tool_definitions(cfg.width, cfg.height, self.limits, undo=cfg.allow_undo, look=cfg.allow_look)
+        self.tool_names = {t["name"] for t in self.tools}
         self.system = cfg.system_prompt.format(width=cfg.width, height=cfg.height, max_actions=cfg.max_actions)
         if max(cfg.width, cfg.height) > cfg.view_size:
             self.system += (f"\n\n(The canvas image you see is scaled down to fit {cfg.view_size} pixels. "
@@ -196,6 +216,8 @@ class PaintingSession:
             cache_control={"type": "ephemeral"},
             betas=[],
         )
+        if self.cfg.one_call_per_turn:
+            kwargs["tool_choice"] = {"type": "auto", "disable_parallel_tool_use": True}
         if self.cfg.thinking_summaries:
             kwargs["thinking"] = {"type": "adaptive", "display": "summarized"}
         if self.cfg.context_editing:
@@ -215,21 +237,34 @@ class PaintingSession:
             kwargs["fallbacks"] = "default"
         if not kwargs["betas"]:
             del kwargs["betas"]
-        for attempt in range(self.cfg.empty_refusal_retries + 1):
-            with self.client.beta.messages.stream(**kwargs) as stream:
-                msg = stream.get_final_message()
+        empty = transient = 0
+        while True:
+            try:
+                with self.client.beta.messages.stream(**kwargs) as stream:
+                    msg = stream.get_final_message()
+            except (anthropic.APIConnectionError, anthropic.APIStatusError) as e:
+                # The SDK already retries errors that arrive before the response starts; this
+                # catches ones that arrive mid-stream (some providers send "model temporarily
+                # unavailable" that way). Nothing was added to the conversation, so resend.
+                if not _is_transient(e) or transient >= self.cfg.transient_retries:
+                    raise
+                transient += 1
+                self.stats.transient_errors += 1
+                self._log("transient_error_retry", attempt=transient, error=str(e)[:300])
+                time.sleep(min(2 ** transient, 60))
+                continue
             u = msg.usage
             self.stats.requests += 1
             self.stats.input_tokens += u.input_tokens or 0
             self.stats.output_tokens += u.output_tokens or 0
             self.stats.cache_read += getattr(u, "cache_read_input_tokens", 0) or 0
             self.stats.cache_write += getattr(u, "cache_creation_input_tokens", 0) or 0
-            if not is_empty_refusal(msg) or attempt == self.cfg.empty_refusal_retries:
+            if not is_empty_refusal(msg) or empty >= self.cfg.empty_refusal_retries:
                 return msg
+            empty += 1
             self.stats.empty_refusals += 1
-            self._log("empty_refusal_retry", attempt=attempt + 1)
-            time.sleep(min(2 ** attempt, 20))
-        return msg
+            self._log("empty_refusal_retry", attempt=empty)
+            time.sleep(min(2 ** (empty - 1), 20))
 
     # ------------------------------------------------------------------ loop
     def run(self, on_event=None) -> Path:
@@ -293,18 +328,28 @@ class PaintingSession:
     def _run_tools(self, uses, truncated: bool, say) -> list[dict[str, Any]]:
         results: list[dict[str, Any]] = []
         changed = False
+        acted = False
         for i, tu in enumerate(uses):
             if truncated:
                 results.append({"type": "tool_result", "tool_use_id": tu.id, "is_error": True,
                                 "content": "Your output was cut off before this call was complete; nothing was applied."})
                 continue
+            if tu.name not in self.tool_names:
+                results.append({"type": "tool_result", "tool_use_id": tu.id, "is_error": True,
+                                "content": f"There is no `{tu.name}` tool."})
+                continue
+            if self.cfg.one_call_per_turn and acted and tu.name != "finish":
+                results.append({"type": "tool_result", "tool_use_id": tu.id, "is_error": True,
+                                "content": "Not done: one stroke at a time. You'll see the canvas after each one."})
+                continue
             if self.stats.actions >= self.cfg.max_actions and tu.name in MARKING_TOOLS:
                 results.append({"type": "tool_result", "tool_use_id": tu.id, "is_error": True,
-                                "content": "No actions left. Call `finish` when you're ready."})
+                                "content": "No strokes left. Call `finish` when you're ready."})
                 continue
+            acted = True
             self._seed_counter += 1
             try:
-                out = apply_tool(self.canvas, tu.name, tu.input, self._seed_counter)
+                out = apply_tool(self.canvas, tu.name, tu.input, self._seed_counter, self.limits)
             except ToolError as e:
                 results.append({"type": "tool_result", "tool_use_id": tu.id, "is_error": True, "content": f"Error: {e}"})
                 self._log("tool_error", tool=tu.name, input=tu.input, error=str(e))
@@ -330,15 +375,16 @@ class PaintingSession:
             self.stats.actions += 1
             changed = True
             self._save_frame()
+            view_at = len(results)
             results.append({"type": "tool_result", "tool_use_id": tu.id, "content": [{"type": "text", "text": "ok"}]})
 
         if changed and self.finished is None:
-            # Attach the current canvas once, to the last result of this batch.
+            # Attach the current canvas once, to the result of the last call that changed it.
             left = self.cfg.max_actions - self.stats.actions
             view = self._image_block(self.canvas.image(), f"frame-{self.stats.actions:04d}")
-            last = results[-1]
+            last = results[view_at]
             content = last["content"] if isinstance(last["content"], list) else [{"type": "text", "text": last["content"]}]
-            last["content"] = content + [view, {"type": "text", "text": f"{left} actions left."}]
+            last["content"] = content + [view, {"type": "text", "text": f"{left} strokes left."}]
         return results
 
     def _wrap_up(self, say) -> None:
@@ -356,6 +402,7 @@ class PaintingSession:
             "actions": self.stats.actions,
             "requests": self.stats.requests,
             "empty_refusal_retries": self.stats.empty_refusals,
+            "transient_error_retries": self.stats.transient_errors,
             "tokens": {
                 "input": self.stats.input_tokens,
                 "output": self.stats.output_tokens,

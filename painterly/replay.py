@@ -6,18 +6,20 @@ import json
 from pathlib import Path
 
 from .canvas import Canvas
-from .tools import ToolError, apply_tool
+from .tools import Limits, ToolError, apply_tool
 
 
 def replay(run_dir: Path, out: Path | None = None) -> Path:
     cfg = json.loads((run_dir / "config.json").read_text())
     canvas = Canvas(cfg["width"], cfg["height"], paper=cfg["paper"], seed=cfg["seed"])
+    default = Limits.for_canvas(cfg["width"], cfg["height"])
+    limits = Limits(cfg.get("max_stroke_length") or default.max_stroke_length, cfg.get("max_brush_size") or default.max_brush_size)
     for line in (run_dir / "events.jsonl").read_text().splitlines():
         ev = json.loads(line)
         if ev["kind"] != "tool" or ev["tool"] in ("look", "finish"):
             continue
         try:
-            apply_tool(canvas, ev["tool"], ev["input"], ev["seed"])
+            apply_tool(canvas, ev["tool"], ev["input"], ev["seed"], limits)
         except ToolError as e:
             print(f"skipped {ev['tool']}: {e}")
     out = out or run_dir / "replay.png"

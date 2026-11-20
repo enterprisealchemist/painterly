@@ -2,84 +2,77 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
-from .canvas import BLEND_MODES, BRUSHES, Canvas, hex_to_rgb
+from .canvas import BLEND_MODES, BRUSHES, Canvas, arc_length, arc_path, hex_to_rgb
 
 _brush_list = "\n".join(f"- {b.name}: {b.description}" for b in BRUSHES.values())
 
 POINT = {"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2}
 
 
-def tool_definitions(width: int, height: int) -> list[dict[str, Any]]:
+@dataclass(frozen=True)
+class Limits:
+    """Physical limits on a single stroke, in canvas pixels."""
+
+    max_stroke_length: float
+    max_brush_size: float
+
+    @classmethod
+    def for_canvas(cls, width: int, height: int, stroke_frac: float = 0.4, brush_frac: float = 0.15) -> "Limits":
+        side = max(width, height)
+        return cls(round(side * stroke_frac), round(side * brush_frac))
+
+
+def tool_definitions(width: int, height: int, limits: Limits | None = None, undo: bool = True, look: bool = True) -> list[dict[str, Any]]:
+    lim = limits or Limits.for_canvas(width, height)
     coord = f"Canvas pixels: x 0..{width} left to right, y 0..{height} top to bottom."
-    return [
+    tools: list[dict[str, Any]] = [
         {
-            "name": "stroke",
+            "name": "brush",
             "description": (
-                "Drag a brush through a sequence of points. The path is smoothed into a curve "
-                "through the points, so a few well-placed points make a fluid stroke; one point "
-                f"makes a single dab. {coord}\n\nBrushes:\n{_brush_list}"
+                "Make one brushstroke: put the brush down at `start`, move it to `end` in a single "
+                "motion, and lift it. The stroke is a straight line or a single smooth arc "
+                f"(`curvature`). A stroke can be at most {lim.max_stroke_length:g} px long along its "
+                f"arc; for anything longer, use several strokes. Starting and ending at the same "
+                f"point makes a dab. {coord}\n\nBrushes:\n{_brush_list}"
             ),
             "input_schema": {
                 "type": "object",
                 "properties": {
                     "brush": {"type": "string", "enum": list(BRUSHES)},
-                    "points": {"type": "array", "items": POINT, "minItems": 1, "maxItems": 400},
+                    "start": {**POINT, "description": "[x, y] where the brush touches down."},
+                    "end": {**POINT, "description": "[x, y] where it lifts off."},
+                    "curvature": {"type": "number", "description": (
+                        "How much the stroke bends, -1 to 1. 0 is straight; 1 bows into a half "
+                        "circle to the left of the direction of travel (as you see the canvas), -1 "
+                        "to the right. Default 0.")},
+                    "pressure": {"type": "array", "items": {"type": "number"}, "minItems": 1, "maxItems": 12,
+                                 "description": (
+                        "Pressure along the stroke, 0-1, as values spaced evenly from start to end "
+                        "and eased smoothly between, e.g. [0.2, 1, 1, 0.3] to press in and lift "
+                        "off, or [0.6] for steady pressure. Pressure sets the stroke's width "
+                        "(size is the width at full pressure) and how much paint it lays down.")},
                     "color": {"type": "string", "description": "Hex colour, e.g. '#2b4a6f'."},
-                    "size": {"type": "number", "description": "Brush width in pixels (1-400)."},
-                    "opacity": {"type": "number", "description": "0-1. Default 1."},
-                    "hardness": {"type": "number", "description": "Edge crispness 0-1. Default depends on the brush."},
-                    "taper_in": {"type": "number", "description": "0-1: fraction of the stroke over which width swells from a point at the start."},
-                    "taper_out": {"type": "number", "description": "0-1: same, thinning to a point at the end."},
-                    "fade": {"type": "number", "description": "0-1: how much the brush runs out of paint by the end of the stroke."},
-                    "jitter": {"type": "number", "description": "0-1: hand wobble applied to the path (for spatter: droplet density)."},
-                    "blend": {"type": "string", "enum": list(BLEND_MODES), "description": "How the paint mixes with what's beneath. 'erase' lifts paint back to bare paper."},
+                    "size": {"type": "number", "description": f"Width at full pressure in pixels (1-{lim.max_brush_size:g})."},
+                    "load": {"type": "number", "description": (
+                        "How much paint is on the brush, 0-1. Default 1. With less, the stroke "
+                        "runs dry toward its end.")},
+                    "dilution": {"type": "number", "description": (
+                        "How thinned the paint is, 0-0.95. Default 0 (straight from the tube); "
+                        "higher is more transparent.")},
                 },
-                "required": ["brush", "points", "color", "size"],
+                "required": ["brush", "start", "end", "pressure", "color", "size"],
                 "additionalProperties": False,
             },
             "eager_input_streaming": True,
         },
-        {
-            "name": "fill",
-            "description": (
-                "Lay paint over a polygon, or over the whole canvas when `points` is omitted. "
-                f"Optionally a linear gradient from `color` to `color_to`. {coord}"
-            ),
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "color": {"type": "string"},
-                    "points": {"type": "array", "items": POINT, "minItems": 3, "maxItems": 400, "description": "Polygon vertices. Omit to cover the whole canvas."},
-                    "color_to": {"type": "string", "description": "End colour for a gradient."},
-                    "angle": {"type": "number", "description": "Gradient direction in degrees: 0 = left to right, 90 = top to bottom."},
-                    "opacity": {"type": "number"},
-                    "softness": {"type": "number", "description": "Edge blur radius in pixels."},
-                    "texture": {"type": "string", "enum": ["none", "watercolor", "charcoal", "canvas"]},
-                    "blend": {"type": "string", "enum": list(BLEND_MODES)},
-                },
-                "required": ["color"],
-                "additionalProperties": False,
-            },
-            "eager_input_streaming": True,
-        },
-        {
-            "name": "soften",
-            "description": "Blend wet paint together by blurring a rectangle (or the whole canvas if `region` is omitted).",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "region": {"type": "array", "items": {"type": "number"}, "minItems": 4, "maxItems": 4, "description": "[x, y, width, height]"},
-                    "amount": {"type": "number", "description": "Blur radius in pixels (0.5-40)."},
-                },
-                "additionalProperties": False,
-            },
-            "eager_input_streaming": True,
-        },
-        {
+    ]
+    if look:
+        tools.append({
             "name": "look",
-            "description": "Look closely at part of the canvas: returns that rectangle enlarged. Does not change the canvas.",
+            "description": "Lean in and look closely at part of the canvas: returns that rectangle enlarged. Does not change the canvas.",
             "input_schema": {
                 "type": "object",
                 "properties": {
@@ -92,34 +85,37 @@ def tool_definitions(width: int, height: int) -> list[dict[str, Any]]:
                 "additionalProperties": False,
             },
             "eager_input_streaming": True,
-        },
-        {
+        })
+    if undo:
+        tools.append({
             "name": "undo",
-            "description": "Take back the most recent marks (strokes, fills, softening).",
+            "description": "Take back your most recent strokes.",
             "input_schema": {
                 "type": "object",
-                "properties": {"steps": {"type": "integer", "description": "How many actions to undo. Default 1."}},
+                "properties": {"steps": {"type": "integer", "description": "How many strokes to undo. Default 1."}},
                 "additionalProperties": False,
             },
             "eager_input_streaming": True,
-        },
-        {
-            "name": "finish",
-            "description": "Call this when you are done with the canvas. Title and note are optional.",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "title": {"type": "string"},
-                    "note": {"type": "string", "description": "Anything you want to say about it, or nothing."},
-                },
-                "additionalProperties": False,
+        })
+    tools.append({
+        "name": "finish",
+        "description": "Call this when you are done with the canvas. Title and note are optional.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string"},
+                "note": {"type": "string", "description": "Anything you want to say about it, or nothing."},
             },
-            "eager_input_streaming": True,
+            "additionalProperties": False,
         },
-    ]
+        "eager_input_streaming": True,
+    })
+    return tools
 
 
-MARKING_TOOLS = {"stroke", "fill", "soften", "undo"}
+# Tools that change the canvas. stroke/fill/soften are no longer offered to the model;
+# they stay here so runs made with them can still be replayed.
+MARKING_TOOLS = {"brush", "stroke", "fill", "soften", "undo"}
 
 
 class ToolError(Exception):
@@ -171,7 +167,17 @@ def _enum(d: dict, key: str, allowed, default=None):
     return v
 
 
-def apply_tool(canvas: Canvas, name: str, args: dict[str, Any], rng_seed: int) -> dict[str, Any]:
+def _point(d: dict, key: str, w: int, h: int):
+    v = d.get(key)
+    if not (isinstance(v, (list, tuple)) and len(v) == 2 and all(isinstance(c, (int, float)) and not isinstance(c, bool) for c in v)):
+        raise ToolError(f"`{key}` must be [x, y]")
+    x, y = float(v[0]), float(v[1])
+    if not (-0.1 * w <= x <= 1.1 * w and -0.1 * h <= y <= 1.1 * h):
+        raise ToolError(f"`{key}` {[x, y]} is off the canvas ({w} by {h})")
+    return [x, y]
+
+
+def apply_tool(canvas: Canvas, name: str, args: dict[str, Any], rng_seed: int, limits: Limits | None = None) -> dict[str, Any]:
     """Apply one tool call. Returns a dict describing what happened (for the log).
 
     Raises ToolError for bad input. The returned dict always has a 'summary' string;
@@ -179,6 +185,40 @@ def apply_tool(canvas: Canvas, name: str, args: dict[str, Any], rng_seed: int) -
     """
     if not isinstance(args, dict):
         raise ToolError("input must be an object")
+
+    if name == "brush":
+        lim = limits or Limits.for_canvas(canvas.w, canvas.h)
+        brush = _enum(args, "brush", BRUSHES)
+        if brush is None:
+            raise ToolError("`brush` is required")
+        start, end = _point(args, "start", canvas.w, canvas.h), _point(args, "end", canvas.w, canvas.h)
+        curvature = _num(args, "curvature", -1, 1, 0.0)
+        pressure = args.get("pressure")
+        if not (isinstance(pressure, list) and 1 <= len(pressure) <= 12
+                and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in pressure)):
+            raise ToolError("`pressure` must be a list of 1 to 12 numbers between 0 and 1")
+        pressure = [float(min(1, max(0, v))) for v in pressure]
+        color = _color(args, "color")
+        size = _num(args, "size", 1, 10_000)
+        if size is None:
+            raise ToolError("`size` is required")
+        if size > lim.max_brush_size:
+            raise ToolError(f"size {size:g} is wider than the widest brush ({lim.max_brush_size:g} px)")
+        length = arc_length(start, end, curvature)
+        if length > lim.max_stroke_length + 0.5:
+            raise ToolError(
+                f"that stroke would be {length:.0f} px long; one stroke can be at most "
+                f"{lim.max_stroke_length:g} px. Nothing was painted. Use several shorter strokes.")
+        load = _num(args, "load", 0, 1, 1.0)
+        dilution = _num(args, "dilution", 0, 0.95, 0.0)
+        step = float(min(10.0, max(1.5, size * 0.175)))
+        path, _ = arc_path(start, end, curvature, step)
+        kw = dict(points=path.tolist(), brush=brush, color=color, size=size, opacity=1.0 - dilution,
+                  taper_in=0.0, taper_out=0.0, fade=1.0 - load, pressure=pressure, dense=True, seed=rng_seed)
+        canvas.checkpoint()
+        canvas.stroke(**kw)
+        shape = "dab" if length < 1 else f"{length:.0f} px" + (f", curvature {curvature:+.2f}" if curvature else "")
+        return {"summary": f"{brush} stroke, {shape}", "params": {k: v for k, v in kw.items() if k != "points"}}
 
     if name == "stroke":
         kw = dict(

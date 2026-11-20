@@ -90,19 +90,19 @@ class BrushSpec:
 BRUSHES: dict[str, BrushSpec] = {
     b.name: b
     for b in [
-        BrushSpec("round", "Plain round brush. Even coverage; `hardness` sets the edge.", 0.6),
+        BrushSpec("round", "Plain round brush with a soft-firm edge and even coverage.", 0.6),
         BrushSpec(
             "ink",
-            "Crisp, fully saturated line with tapered ends, like a pointed brush or nib. "
-            "Good for calligraphic marks; width follows the taper.",
+            "Pointed brush with ink: crisp, fully saturated line whose width follows pressure "
+            "closely. Good for calligraphic marks.",
             0.9,
             taper_in=0.25,
             taper_out=0.35,
         ),
         BrushSpec(
             "bristle",
-            "Loaded hog-hair brush: visible bristle streaks along the stroke. With `fade` the paint "
-            "runs out and the stroke breaks into dry-brush scratches toward the end.",
+            "Hog-hair brush: visible bristle streaks along the stroke. With little paint loaded or "
+            "light pressure it breaks into dry-brush scratches.",
             0.75,
         ),
         BrushSpec(
@@ -114,13 +114,13 @@ BRUSHES: dict[str, BrushSpec] = {
         BrushSpec(
             "knife",
             "Palette knife: opaque, hard-edged slab of paint that skips over the canvas grain, more "
-            "so as it runs out (`fade`).",
+            "so with light pressure or as it runs out.",
             0.95,
         ),
         BrushSpec(
             "watercolor",
             "Transparent wash: soft body, darker pooled edges, pigment granulating in the paper grain. "
-            "Defaults to multiply, so layers deepen like glazes.",
+            "Layers deepen like glazes rather than covering.",
             0.3,
             blend="multiply",
         ),
@@ -132,17 +132,24 @@ BRUSHES: dict[str, BrushSpec] = {
         BrushSpec(
             "charcoal",
             "Dry, grainy mark that catches only the raised tooth of the paper; heavier pressure "
-            "(opacity) fills more of the grain.",
+            "fills more of the grain.",
             0.5,
         ),
         BrushSpec(
             "spatter",
-            "Flicked droplets scattered around the path. `size` sets the spread, `jitter` the "
-            "density, `hardness` how round the droplets are.",
+            "Droplets flicked off the brush, scattered around the stroke. `size` sets the spread, "
+            "pressure how many droplets land.",
             0.8,
         ),
     ]
 }
+
+BRUSHES["blender"] = BrushSpec(
+    "blender",
+    "Clean, dry soft brush: lays down no paint, but blends and softens the paint it passes "
+    "over, like working wet paint together. Colour is ignored.",
+    0.2,
+)
 
 BLEND_MODES = ("normal", "multiply", "screen", "erase")
 
@@ -170,6 +177,59 @@ def _catmull_rom(points: np.ndarray, step: float) -> np.ndarray:
         )
         out.extend(pts)
     return np.asarray(out, dtype=np.float64)
+
+
+def arc_path(start, end, curvature: float = 0.0, step: float = 2.0) -> tuple[np.ndarray, float]:
+    """Points along a constant-curvature arc from `start` to `end`, and its length.
+
+    `curvature` is the bulge as a fraction of half the chord: 0 is straight, +-1 a half
+    circle. Positive bows to the left of the direction of travel as seen on the canvas
+    (y points down), negative to the right.
+    """
+    a, b = np.asarray(start, dtype=np.float64), np.asarray(end, dtype=np.float64)
+    chord = b - a
+    c2 = float(np.linalg.norm(chord))
+    if c2 < 1e-6:
+        return a[None, :].copy(), 0.0
+    e = chord / c2
+    c = c2 / 2.0
+    k = float(np.clip(curvature, -1.0, 1.0))
+    if abs(k) < 1e-4:
+        n = max(1, int(math.ceil(c2 / step)))
+        return a + np.linspace(0, 1, n + 1)[:, None] * chord, c2
+    left = np.array([e[1], -e[0]])  # left of travel on screen, with y pointing down
+    nrm = left * math.copysign(1.0, k)
+    sag = abs(k) * c
+    R = (c * c + sag * sag) / (2 * sag)
+    theta = math.atan2(c, R - sag)  # half the angle the arc subtends
+    length = 2 * R * theta
+    centre = (a + b) / 2 - nrm * (R - sag)
+    n = max(2, int(math.ceil(length / step)))
+    phi = np.linspace(-theta, theta, n + 1)[:, None]
+    return centre + R * (np.cos(phi) * nrm + np.sin(phi) * e), length
+
+
+def arc_length(start, end, curvature: float = 0.0) -> float:
+    c2 = math.dist(start, end)
+    k = abs(float(np.clip(curvature, -1.0, 1.0)))
+    if c2 < 1e-6 or k < 1e-4:
+        return c2
+    c, sag = c2 / 2, k * c2 / 2
+    R = (c * c + sag * sag) / (2 * sag)
+    return 2 * R * math.atan2(c, R - sag)
+
+
+def pressure_at(samples, t: np.ndarray) -> np.ndarray:
+    """Pressure along the stroke: `samples` are evenly spaced from start (t=0) to end
+    (t=1), joined by smooth (cosine) easing, so there is no overshoot between them."""
+    p = np.clip(np.asarray(samples, dtype=np.float32), 0.0, 1.0)
+    if len(p) == 1:
+        return np.full_like(t, p[0], dtype=np.float32)
+    x = np.clip(t, 0.0, 1.0) * (len(p) - 1)
+    i = np.minimum(x.astype(np.int32), len(p) - 2)
+    f = x - i
+    f = 0.5 - 0.5 * np.cos(np.pi * f)
+    return (p[i] * (1 - f) + p[i + 1] * f).astype(np.float32)
 
 
 def _taper(t: np.ndarray, tin: float, tout: float) -> np.ndarray:
@@ -245,7 +305,12 @@ class Canvas:
         jitter: float = 0.0,
         blend: str | None = None,
         seed: int | None = None,
+        pressure=None,
+        dense: bool = False,
     ) -> None:
+        """`pressure`: samples (0-1) evenly spaced along the stroke; scales width and how much
+        paint is laid down. `dense`: `points` is already a finished path (e.g. from
+        `arc_path`) and is not smoothed again."""
         spec = BRUSHES[brush]
         hardness = spec.hardness if hardness is None else float(np.clip(hardness, 0, 1))
         tin = spec.taper_in if taper_in is None else float(np.clip(taper_in, 0, 1))
@@ -261,16 +326,25 @@ class Canvas:
             pts = pts + rng.normal(0, jitter * radius * 0.6, pts.shape)
 
         if brush == "spatter":
-            alpha, x0, y0 = self._spatter(pts, radius, hardness, jitter, fade, rng)
+            alpha, x0, y0 = self._spatter(pts, radius, hardness, jitter, fade, rng, pressure, dense)
         else:
-            alpha, x0, y0 = self._sweep(pts, brush, radius, hardness, tin, tout, fade, rng)
+            alpha, x0, y0 = self._sweep(pts, brush, radius, hardness, tin, tout, fade, rng, pressure, dense)
         if alpha is None:
             return
-        self._composite(alpha * float(np.clip(opacity, 0, 1)), rgb, x0, y0, blend)
+        alpha = alpha * float(np.clip(opacity, 0, 1))
+        if brush == "blender":
+            # A clean dry brush: pulls neighbouring paint together where it passes.
+            h, w = alpha.shape
+            region = self.rgb[y0 : y0 + h, x0 : x0 + w]
+            soft = blur(region, max(1.0, radius * 0.7))
+            a = np.clip(alpha, 0, 1)[..., None]
+            region[:] = region * (1 - a) + soft * a
+            return
+        self._composite(alpha, rgb, x0, y0, blend)
 
-    def _sweep(self, pts, brush, radius, hardness, tin, tout, fade, rng):
+    def _sweep(self, pts, brush, radius, hardness, tin, tout, fade, rng, pressure=None, dense=False):
         step = float(np.clip(radius * 0.35, 1.5, 10.0))
-        path = _catmull_rom(pts, step) if len(pts) >= 2 else pts
+        path = _catmull_rom(pts, step) if len(pts) >= 2 and not dense else pts
         if len(path) == 1:
             path = np.vstack([path, path + [0.01, 0.0]])
         seglen = np.linalg.norm(np.diff(path, axis=0), axis=1)
@@ -278,6 +352,8 @@ class Canvas:
         total = max(cum[-1], 1e-6)
         tpath = cum / total
         wpath = radius * _taper(tpath, tin, tout)
+        if pressure is not None:
+            wpath = wpath * (0.06 + 0.94 * pressure_at(pressure, tpath))
 
         pad = int(radius * 1.6) + 3
         x0 = max(0, int(math.floor(path[:, 0].min())) - pad)
@@ -327,13 +403,19 @@ class Canvas:
         nd = np.where(inside, nd, 9.0)
         grain = self.grain[y0:y1, x0:x1]
         load = np.clip(1.0 - fade * T, 0.0, 1.0)  # paint remaining along the stroke
+        dryness = fade * 1.1
+        if pressure is not None:
+            # light pressure lays down less paint and lets a bristle brush skip
+            P = pressure_at(pressure, T)
+            load = load * (0.5 + 0.5 * P)
+            dryness = dryness + 0.5 * (1.0 - P)
         edge = lambda h: 1.0 - smoothstep(min(h, 0.97), 1.0, nd)  # noqa: E731
 
-        if brush in ("round", "ink"):
+        if brush in ("round", "ink", "blender"):
             alpha = edge(hardness)
             if brush == "ink":
                 alpha *= 0.92 + 0.08 * grain
-            alpha *= 0.35 + 0.65 * load if fade > 0 else 1.0
+            alpha *= 0.35 + 0.65 * load if (fade > 0 or pressure is not None) else 1.0
         elif brush == "airbrush":
             alpha = np.exp(-3.2 * nd * nd) * (nd < 1.6)
             alpha *= load
@@ -360,7 +442,7 @@ class Canvas:
             i0 = sp.astype(np.int32)
             f = sp - i0
             along = lane_noise[lane, i0] * (1 - f) + lane_noise[lane, i0 + 1] * f
-            dry = smoothstep(-0.08, 0.08, load + 0.3 * (along - 0.5) - thresh[lane] * fade * 1.1)
+            dry = smoothstep(-0.08, 0.08, load + 0.3 * (along - 0.5) - thresh[lane] * dryness)
             body = edge(hardness)
             if brush == "flat":
                 body = body * ((T > 0.0) & (T < 1.0))  # square ends
@@ -386,8 +468,8 @@ class Canvas:
         alpha = np.where(inside, alpha, 0.0).astype(np.float32)
         return alpha, x0, y0
 
-    def _spatter(self, pts, radius, hardness, jitter, fade, rng):
-        if len(pts) >= 2:
+    def _spatter(self, pts, radius, hardness, jitter, fade, rng, pressure=None, dense=False):
+        if len(pts) >= 2 and not dense:
             path = _catmull_rom(pts, 2.0)
         else:
             path = pts
@@ -409,6 +491,8 @@ class Canvas:
         for k, i in enumerate(idx):
             t = i / max(1, len(path) - 1)
             if rng.random() < fade * t:
+                continue
+            if pressure is not None and rng.random() > float(pressure_at(pressure, np.array([t]))[0]):
                 continue
             off = rng.normal(0, radius * 0.6, 2)
             cx, cy = path[i] + off

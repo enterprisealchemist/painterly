@@ -37,6 +37,10 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--inline-images", action="store_true", help="send canvas views as base64 (no Files API)")
     r.add_argument("--no-context-editing", action="store_true", help="don't ask the server to clear old canvas views")
     r.add_argument("--no-thinking-summaries", action="store_true", help="don't request thinking summaries")
+    r.add_argument("--max-stroke-length", type=float, help="longest single stroke in px, along its arc (default 40%% of the longer side)")
+    r.add_argument("--max-brush-size", type=float, help="widest brush in px (default 15%% of the longer side)")
+    r.add_argument("--no-undo", action="store_true", help="every stroke is final")
+    r.add_argument("--no-look", action="store_true", help="no zooming in on the canvas")
     r.add_argument("--view-size", type=int, help="longest side of the image the model sees (default 1024; 768 with --inline-images)")
 
     p = sub.add_parser("replay", help="re-render a run from its event log")
@@ -87,6 +91,10 @@ def main(argv: list[str] | None = None) -> int:
             inline_images=a.inline_images,
             context_editing=not a.no_context_editing,
             thinking_summaries=not a.no_thinking_summaries,
+            max_stroke_length=a.max_stroke_length,
+            max_brush_size=a.max_brush_size,
+            allow_undo=not a.no_undo,
+            allow_look=not a.no_look,
             view_size=a.view_size or (768 if a.inline_images else 1024),
             **({"system_prompt": a.prompt.read_text()} if a.prompt else {}),
         )

@@ -17,24 +17,29 @@ def _msg(content, stop="tool_use"):
     })
 
 
+def _brush(i, **kw):
+    args = {"brush": "bristle", "start": [100, 600], "end": [400, 560], "pressure": [0.3, 1, 0.4],
+            "color": "#2d1e2f", "size": 40, **kw}
+    return {"type": "tool_use", "id": f"t{i}", "name": "brush", "input": args}
+
+
 SCRIPT = [
     _msg([
         {"type": "thinking", "thinking": "A wide quiet field, then one line.", "signature": "s"},
         {"type": "text", "text": "Starting with a wash."},
-        {"type": "tool_use", "id": "t1", "name": "fill", "input": {"color": "#d8e2dc", "color_to": "#5b6c8f", "angle": 90}},
-        {"type": "tool_use", "id": "t2", "name": "stroke", "input": {"brush": "bristle", "points": [[100, 600], [500, 560], [900, 640]], "color": "#2d1e2f", "size": 40, "fade": 0.8}},
+        _brush(1, brush="watercolor", start=[50, 200], end=[420, 200], curvature=0.3, color="#5b6c8f", size=150),
+        _brush(2),  # a second call in the same turn is refused
     ]),
-    _msg([
-        {"type": "tool_use", "id": "t3", "name": "stroke", "input": {"brush": "nope", "points": [[1, 1]], "color": "#000", "size": 3}},
-        {"type": "tool_use", "id": "t4", "name": "look", "input": {"x": 0, "y": 500, "width": 300, "height": 200}},
-    ]),
-    _msg([
-        {"type": "tool_use", "id": "t5", "name": "stroke", "input": {"brush": "spatter", "points": [[400, 300], [600, 320]], "color": "#c44536", "size": 120, "jitter": 0.5}},
-        {"type": "tool_use", "id": "t6", "name": "undo", "input": {}},
-        {"type": "tool_use", "id": "t7", "name": "stroke", "input": {"brush": "watercolor", "points": [[300, 300], [700, 280]], "color": "#c44536", "size": 90, "opacity": 0.7}},
-    ]),
+    _msg([_brush(3, brush="nope")]),  # unknown brush -> error
+    _msg([{"type": "tool_use", "id": "t4", "name": "look", "input": {"x": 0, "y": 500, "width": 300, "height": 200}}]),
+    _msg([_brush(5, start=[0, 0], end=[900, 900])]),  # too long -> error
+    _msg([{"type": "tool_use", "id": "t6", "name": "fill", "input": {"color": "#000"}}]),  # not offered
+    _msg([_brush(7)]),
+    _msg([_brush(8, brush="spatter", start=[500, 300], end=[500, 300], pressure=[1], color="#c44536", size=120)]),
+    _msg([{"type": "tool_use", "id": "t9", "name": "undo", "input": {}}]),
+    _msg([_brush(10, brush="blender", start=[100, 150], end=[400, 250], pressure=[0.8], size=60)]),
     _msg([{"type": "text", "text": "Hm."}], stop="end_turn"),
-    _msg([{"type": "tool_use", "id": "t8", "name": "finish", "input": {"title": "Test", "note": "fine"}}]),
+    _msg([{"type": "tool_use", "id": "t11", "name": "finish", "input": {"title": "Test", "note": "fine"}}]),
 ]
 
 
@@ -53,6 +58,8 @@ class FakeClient:
     def _stream(self, **kw):
         self.requests.append({**kw, "messages": list(kw["messages"])})
         msg = self.script[len(self.requests) - 1]
+        if isinstance(msg, Exception):
+            raise msg
 
         class Ctx:
             def __enter__(s):
@@ -66,23 +73,31 @@ class FakeClient:
 
 def test_full_loop(tmp_path):
     client = FakeClient()
-    s = PaintingSession(RunConfig(out_dir=tmp_path, max_actions=10), client=client)
+    s = PaintingSession(RunConfig(out_dir=tmp_path, max_actions=20), client=client)
     run_dir = s.run()
 
     summary = json.loads((run_dir / "summary.json").read_text())
     assert summary["finished"] and summary["title"] == "Test"
-    assert summary["actions"] == 5  # fill, stroke, spatter, undo, watercolor
+    assert summary["actions"] == 5  # watercolor, bristle, spatter dab, undo, blender
     assert (run_dir / "final.png").exists() and (run_dir / "timelapse.gif").exists()
 
-    # bad brush came back as an error result; look returned an image
-    second_results = client.requests[2]["messages"][-1]["content"]
-    assert second_results[0]["is_error"] is True
-    assert second_results[1]["content"][0]["type"] == "image"
-    # the canvas view is attached once per batch, on the last result
-    first_results = client.requests[1]["messages"][-1]["content"]
-    assert [b["type"] for b in first_results[-1]["content"]] == ["text", "image", "text"]
+    # one call per turn, asked of the API and enforced locally
+    assert client.requests[0]["tool_choice"] == {"type": "auto", "disable_parallel_tool_use": True}
+    assert [t["name"] for t in client.requests[0]["tools"]] == ["brush", "look", "undo", "finish"]
+    first = client.requests[1]["messages"][-1]["content"]
+    assert first[1]["is_error"] and "one stroke at a time" in first[1]["content"]
+    assert [b["type"] for b in first[0]["content"]] == ["text", "image", "text"]  # view after the stroke
+    assert first[0]["content"][-1]["text"] == "19 strokes left."
+
+    def result(n):
+        return client.requests[n]["messages"][-1]["content"][0]
+
+    assert result(2)["is_error"]  # unknown brush
+    assert result(3)["content"][0]["type"] == "image"  # look
+    assert result(4)["is_error"] and "at most 410 px" in result(4)["content"]
+    assert result(5)["is_error"] and "no `fill` tool" in result(5)["content"]
     # nudge after a turn with no tool call
-    assert client.requests[4]["messages"][-1]["content"].startswith("(The canvas")
+    assert client.requests[10]["messages"][-1]["content"].startswith("(The canvas")
     # replay reproduces the final image exactly
     from PIL import Image, ImageChops
     rp = replay(run_dir)
@@ -97,9 +112,18 @@ def test_inline_images_without_optional_features(tmp_path):
     PaintingSession(cfg, client=client).run()
     req = client.requests[1]
     assert "context_management" not in req and "thinking" not in req and "betas" not in req
-    view = req["messages"][-1]["content"][-1]["content"][1]
+    view = req["messages"][-1]["content"][0]["content"][1]
     assert view["source"]["type"] == "base64"
     assert client.n == 0  # nothing went through the Files API
+
+
+def test_no_undo_no_look(tmp_path):
+    client = FakeClient([SCRIPT[-1]])
+    cfg = RunConfig(out_dir=tmp_path, allow_undo=False, allow_look=False, max_stroke_length=200)
+    PaintingSession(cfg, client=client).run()
+    tools = client.requests[0]["tools"]
+    assert [t["name"] for t in tools] == ["brush", "finish"]
+    assert "at most 200 px" in tools[0]["description"]
 
 
 def test_empty_refusals_are_resent(tmp_path, monkeypatch):
@@ -111,7 +135,23 @@ def test_empty_refusals_are_resent(tmp_path, monkeypatch):
     client = FakeClient([empty, empty, SCRIPT[0], empty, SCRIPT[-1]])
     run_dir = PaintingSession(RunConfig(out_dir=tmp_path, max_actions=10), client=client).run()
     summary = json.loads((run_dir / "summary.json").read_text())
-    assert summary["finished"] and summary["actions"] == 2
+    assert summary["finished"] and summary["actions"] == 1
     assert summary["empty_refusal_retries"] == 3
     # a resend is the identical request
     assert client.requests[0]["messages"] == client.requests[2]["messages"]
+
+
+def test_mid_stream_unavailable_is_resent(tmp_path, monkeypatch):
+    import anthropic
+    import httpx2 as httpx
+
+    monkeypatch.setattr("painterly.agent.time.sleep", lambda s: None)
+    req = httpx.Request("POST", "https://example.invalid/v1/messages")
+    err = anthropic.APIStatusError(
+        "The requested model is temporarily unavailable. Please try again later.",
+        response=httpx.Response(200, request=req), body=None)
+    client = FakeClient([SCRIPT[0], err, SCRIPT[-1]])
+    run_dir = PaintingSession(RunConfig(out_dir=tmp_path), client=client).run()
+    summary = json.loads((run_dir / "summary.json").read_text())
+    assert summary["finished"] and summary["transient_error_retries"] == 1
+    assert client.requests[1]["messages"] == client.requests[2]["messages"]
