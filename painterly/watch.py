@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import time
 from pathlib import Path
 
@@ -29,9 +30,12 @@ def watch(run_dir: Path, every: int = 10, stall: float = 180.0, from_start: bool
     def say(line: str) -> None:
         print(line, flush=True)
 
-    with open(path, encoding="utf-8") as f:
+    f = open(path, encoding="utf-8")
+    inode, seen = os.stat(path).st_ino, 0
+    try:
         if not from_start:  # catch up silently on what's already there
             for line in f:
+                seen += 1
                 ev = json.loads(line)
                 k = ev["kind"]
                 strokes += k == "tool" and ev.get("tool") in ("brush", "undo")
@@ -40,6 +44,20 @@ def watch(run_dir: Path, every: int = 10, stall: float = 180.0, from_start: bool
         say(f"watching {run_dir.name}: {strokes} strokes so far, {reminders} reminders, {critiques} critiques")
         while True:
             line = f.readline()
+            st = os.stat(path) if path.exists() else None
+            if not line and st and (st.st_ino != inode or st.st_size < f.tell()):
+                # rewritten (e.g. by `resume`, which drops an unfinished turn): reopen and skip
+                # the lines already reported
+                f.close()
+                f = open(path, encoding="utf-8")
+                inode = st.st_ino
+                kept = f.read().splitlines()
+                seen = min(seen, len(kept))
+                f.seek(0)
+                for _ in range(seen):
+                    f.readline()
+                say(f"(log rewritten, probably resumed; following again at stroke {strokes})")
+                continue
             if not line:
                 if not stalled and time.time() - last_event > stall:
                     say(f"STALLED: nothing new for {stall:.0f}s (at stroke {strokes})")
@@ -49,7 +67,11 @@ def watch(run_dir: Path, every: int = 10, stall: float = 180.0, from_start: bool
             if not line.endswith("\n"):  # a partly written line; wait for the rest
                 time.sleep(0.2)
                 line += f.readline()
-            ev = json.loads(line)
+            try:
+                ev = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            seen += 1
             last_event, stalled = time.time(), False
             k = ev["kind"]
             if k == "tool" and ev.get("tool") in ("brush", "undo"):
@@ -76,6 +98,8 @@ def watch(run_dir: Path, every: int = 10, stall: float = 180.0, from_start: bool
             if k in END_KINDS:
                 say(f"ENDED ({k}) at stroke {strokes}: {reminders} reminders, {critiques} critiques")
                 return
+    finally:
+        f.close()
 
 
 def main() -> None:
