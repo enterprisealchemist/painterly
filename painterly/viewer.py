@@ -55,7 +55,7 @@ def build_steps(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 steps.append({"frame": last_frame, "kind": tool, "stroke": ev.get("input"), "notes": pending})
                 pending = []
         elif k == "reminder":
-            pending.append({"type": "system", "text": "It ended a turn without a call, was reminded \"(One call every turn.)\", and its next turn was required to make one."})
+            pending.append({"type": "system", "text": "It ended a turn without a stroke, was reminded \"(One stroke every turn.)\", and its next turn was required to be a stroke."})
         elif k == "nudge":
             pending.append({"type": "system", "text": "It ended a turn without making a stroke and was nudged to carry on."})
         elif k == "resumed":

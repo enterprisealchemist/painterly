@@ -146,15 +146,18 @@ and easy to change:
 
 - **A stripped-down prompt.** The painter is told that it's a painter with a canvas and
   brushes, to paint whatever is in its heart and let the truth come out, to apply one
-  stroke at a time (exactly one call every turn), and that it goes on indefinitely. It
+  stroke at a time (exactly one stroke every turn), and that it goes on indefinitely. It
   isn't given a subject, mood or style, and it isn't told about abstraction, plans,
   coverage or finishing. Earlier versions mentioned those, and each one visibly steered
   the result. `--prompt my_prompt.txt` compares framings, and `config.json` has the exact
   text each run got.
-- **One call every turn.** Normal turns aren't forced, so the painter's thinking and words
-  come through. If it ends a turn without a call, it's reminded "(One call every turn.)"
-  and the next request is forced. A forced turn comes back as a bare tool call with no
-  thinking. Resting never ends the session.
+- **One stroke every turn.** Every turn must include a brush stroke. `show` and `look` can
+  come alongside it, and the stroke lands first, so a critic shown the canvas sees it.
+  Normal turns aren't forced, so the painter's thinking and words come through. A turn
+  without a stroke gets "(One stroke every turn.)", and the next request is forced to be a
+  stroke. That turn comes back with no thinking. Resting never ends the session. In an
+  earlier version, any call counted; the painter said "the painting is finished" 55 times
+  and each time spent its forced turn showing the canvas to the critic.
 - **Open-ended.** There is no `finish` tool, and nothing mentions finishing. A session
   stops quietly after `--max-actions` strokes, without the model being told, and
   `resume --max-actions` carries on from exactly that point. `--finish` brings back the old

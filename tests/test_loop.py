@@ -84,10 +84,10 @@ def test_full_loop(tmp_path):
     assert (run_dir / "final.png").exists() and (run_dir / "timelapse.gif").exists()
 
     # one call per turn, asked of the API and enforced locally
-    assert client.requests[0]["tool_choice"] == {"type": "auto", "disable_parallel_tool_use": True}
+    assert "tool_choice" not in client.requests[0]  # not forced; one stroke per turn is enforced locally
     assert [t["name"] for t in client.requests[0]["tools"]] == ["brush", "look", "undo", "show", "finish"]
     first = client.requests[1]["messages"][-1]["content"]
-    assert first[1]["is_error"] and "only the first call" in first[1]["content"]
+    assert first[1]["is_error"] and "one stroke per turn" in first[1]["content"]
     assert [b["type"] for b in first[0]["content"]] == ["text", "image"]  # view after the stroke, no countdown
 
     def result(n):
@@ -337,12 +337,12 @@ def test_a_turn_without_a_call_gets_a_reminder_and_a_forced_turn(tmp_path):
     client = FakeClient([SCRIPT[0], quiet, _msg([_brush(9)]), quiet, _msg([_brush(10)])])
     run_dir = PaintingSession(RunConfig(out_dir=tmp_path, max_actions=3, critic_every=0), client=client).run()
     reqs = client.requests
-    assert reqs[0]["tool_choice"]["type"] == "auto" and reqs[1]["tool_choice"]["type"] == "auto"
-    assert reqs[2]["messages"][-1]["content"] == "(One call every turn.)"
-    assert reqs[2]["tool_choice"] == {"type": "any", "disable_parallel_tool_use": True}  # forced after a lapse
-    assert reqs[3]["tool_choice"]["type"] == "auto"  # and back to normal
+    assert "tool_choice" not in reqs[0] and "tool_choice" not in reqs[1]
+    assert reqs[2]["messages"][-1]["content"] == "(One stroke every turn.)"
+    assert reqs[2]["tool_choice"] == {"type": "tool", "name": "brush"}  # a stroke is forced after a lapse
+    assert "tool_choice" not in reqs[3]  # and back to normal
     assert json.loads((run_dir / "summary.json").read_text())["actions"] == 3  # the session didn't end on a rest
-    assert "must make exactly one call" in reqs[0]["system"]
+    assert "must make exactly one stroke" in reqs[0]["system"]
     for word in ("abstract", "squiggle", "finish", "plan"):
         assert word not in reqs[0]["system"].lower()
 
@@ -387,3 +387,23 @@ def test_critic_also_stops_by_every_n_strokes(tmp_path):
     assert [b["type"] for b in back] == ["text", "image", "text"] and "A lot of blue" in back[-1]["text"]
     events = [json.loads(line) for line in (run_dir / "events.jsonl").read_text().splitlines()]
     assert [(e["stroke"], e["asked"]) for e in events if e["kind"] == "critique"] == [(2, False), (4, False)]
+
+
+def test_show_alone_is_not_a_turn_and_show_with_a_stroke_sees_it(tmp_path):
+    note = _msg([{"type": "text", "text": "Nice."}], stop="end_turn")
+    show = {"type": "tool_use", "id": "sh", "name": "show", "input": {}}
+    script = [_msg([show]), note,  # show only: critic answers, then a reminder and a forced stroke
+              _msg([_brush(1)]),
+              _msg([dict(show, id="sh2"), _brush(2, points=[[600, 600], [900, 900]])]), note,  # show listed first
+              _msg([_brush(3)])]
+    client = FakeClient(script)
+    PaintingSession(RunConfig(out_dir=tmp_path, max_actions=3, critic_every=0, inline_images=True), client=client).run()
+    after_show = client.requests[2]
+    assert after_show["tool_choice"] == {"type": "tool", "name": "brush"}
+    assert after_show["messages"][-1]["content"][-1] == {"type": "text", "text": "(One stroke every turn.)"}
+    # stroke and show in one turn: the stroke lands first, so the critic sees it
+    critic = client.requests[4]
+    assert "after 2 strokes" in json.dumps(critic["messages"], default=str)
+    back = client.requests[5]["messages"][-1]["content"]
+    assert [b["tool_use_id"] for b in back] == ["sh2", "t2"]  # answered in the order asked
+    assert "tool_choice" not in client.requests[5]

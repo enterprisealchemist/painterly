@@ -23,11 +23,11 @@ You are a painter. You have a canvas, {width} by {height} pixels, and brushes.
 
 Paint whatever is in your heart. Let the truth come out.
 
-Apply one stroke at a time. Every turn, you must make exactly one call. After each stroke \
-you'll see the canvas, then you make the next. This goes on indefinitely.
+Apply one stroke at a time. Every turn, you must make exactly one stroke. After each \
+stroke you'll see the canvas, then you make the next. This goes on indefinitely.
 
 A critic looks at the canvas every so often and tells you what they think. You can also \
-show it to them whenever you like, with `show`."""
+show it to them whenever you like, with `show`, alongside a stroke."""
 
 CRITIC_PROMPT = """\
 You are an art critic. A painter is working on a canvas, {width} by {height} pixels, one \
@@ -45,7 +45,7 @@ FIRST_MESSAGE = "The canvas is ready."
 
 NUDGE = "(The canvas is still open. If you're done, call `finish`; otherwise carry on.)"
 OPEN_NUDGE = "(The painting continues.)"
-REMINDER = "(One call every turn.)"
+REMINDER = "(One stroke every turn.)"
 
 # Rough per-million-token prices for the cost estimate.
 PRICES = {
@@ -90,7 +90,7 @@ class RunConfig:
     critic: bool = True  # the painter can `show` the canvas to a separate critic conversation
     critic_model: str | None = None  # default: the painter's model
     critic_every: int = 10  # the critic also looks after every N strokes unasked; 0 = only when shown
-    require_call: bool = True  # a turn without a call gets a reminder and the next request is forced
+    require_call: bool = True  # a turn without a stroke gets a reminder and the next request must be a stroke
     empty_refusal_retries: int = 6
     transient_retries: int = 8  # resend after mid-stream overload/unavailable errors
     mixing: str = "pigment"  # "pigment": paint mixes like pigment (blue + yellow = green); "rgb": like light
@@ -201,6 +201,7 @@ class PaintingSession:
         self.critiques: list[dict[str, Any]] = []  # the critic's memory: what it was shown and said
         self._committed = 0  # messages already in conversation.jsonl
         self._event_count = 0
+        self._stroked = False
         self.resumed = _resume_dir is not None
         if self.resumed:
             self.dir = _resume_dir
@@ -383,12 +384,11 @@ class PaintingSession:
             cache_control={"type": "ephemeral"},
             betas=[],
         )
-        if self.cfg.one_call_per_turn:
-            kwargs["tool_choice"] = {"type": "auto", "disable_parallel_tool_use": True}
+        # One stroke per turn is enforced in _run_tools; `show`/`look` may come alongside it.
         if force:
-            # Only after a turn without a call: a forced turn comes back as a bare tool call,
+            # Only after a turn without a stroke: a forced turn comes back as a bare tool call,
             # with no thinking or words, so normal turns stay unforced.
-            kwargs["tool_choice"] = {"type": "any", "disable_parallel_tool_use": self.cfg.one_call_per_turn}
+            kwargs["tool_choice"] = {"type": "tool", "name": "brush"}
         if self.cfg.thinking_summaries:
             kwargs["thinking"] = {"type": "adaptive", "display": "summarized"}
         if self.cfg.context_editing:
@@ -413,7 +413,7 @@ class PaintingSession:
                 return self._call(kwargs)
             except anthropic.BadRequestError as e:  # some models refuse forced tool use with thinking
                 self._log("force_refused", error=str(e)[:200])
-                kwargs["tool_choice"] = {"type": "auto", "disable_parallel_tool_use": self.cfg.one_call_per_turn}
+                kwargs.pop("tool_choice", None)
         return self._call(kwargs)
 
     def _call(self, kwargs: dict[str, Any]):
@@ -546,11 +546,19 @@ class PaintingSession:
                     self._commit()
                     continue
 
-                nudges = 0
+                if any(u.name in MARKING_TOOLS for u in uses):
+                    nudges = 0
                 truncated = msg.stop_reason == "max_tokens"
                 results = self._run_tools(uses, truncated, say)
                 if self.finished is None:
-                    self.messages.append({"role": "user", "content": results})
+                    content: list[Any] = list(results)
+                    if self.cfg.require_call and self.cfg.open_ended and not self._stroked and not truncated:
+                        # a turn of only show/look: remind, and the next turn must be a stroke
+                        nudges += 1
+                        content.append({"type": "text", "text": REMINDER})
+                        self._log("reminder")
+                        force = True
+                    self.messages.append({"role": "user", "content": content})
                 self._commit()
                 if self.cfg.open_ended and self.stats.actions >= self.cfg.max_actions:
                     # The session stops here without telling the model; `resume --max-actions`
@@ -587,8 +595,12 @@ class PaintingSession:
     def _run_tools(self, uses, truncated: bool, say) -> list[dict[str, Any]]:
         results: list[dict[str, Any]] = []
         changed = False
-        acted = False
-        for i, tu in enumerate(uses):
+        stroked = False
+        seen: set[str] = set()
+        # The stroke goes first, so a critic shown the canvas this turn sees it.
+        order = sorted(range(len(uses)), key=lambda k: 0 if uses[k].name in MARKING_TOOLS else 1)
+        for i in order:
+            tu = uses[i]
             if truncated:
                 results.append({"type": "tool_result", "tool_use_id": tu.id, "is_error": True,
                                 "content": "Your output was cut off before this call was complete; nothing was applied."})
@@ -597,15 +609,21 @@ class PaintingSession:
                 results.append({"type": "tool_result", "tool_use_id": tu.id, "is_error": True,
                                 "content": f"There is no `{tu.name}` tool."})
                 continue
-            if self.cfg.one_call_per_turn and acted and tu.name != "finish":
+            if self.cfg.one_call_per_turn and tu.name in MARKING_TOOLS and stroked:
                 results.append({"type": "tool_result", "tool_use_id": tu.id, "is_error": True,
-                                "content": "Not carried out: only the first call in a turn is made, so you can see how it landed before the next."})
+                                "content": "Not carried out: one stroke per turn, so you can see how it landed before the next."})
+                continue
+            if self.cfg.one_call_per_turn and tu.name not in MARKING_TOOLS and tu.name in seen:
+                results.append({"type": "tool_result", "tool_use_id": tu.id, "is_error": True,
+                                "content": f"Not carried out: one `{tu.name}` per turn."})
                 continue
             if self.stats.actions >= self.cfg.max_actions and tu.name in MARKING_TOOLS:
                 results.append({"type": "tool_result", "tool_use_id": tu.id, "is_error": True,
                                 "content": "This session can't take any more strokes. Call `finish` when you're ready."})
                 continue
-            acted = True
+            seen.add(tu.name)
+            if tu.name in MARKING_TOOLS:
+                stroked = True
             if tu.name == "show":
                 msg_in = (tu.input or {}).get("message") if isinstance(tu.input, dict) else None
                 say("shown to the critic")
@@ -661,6 +679,9 @@ class PaintingSession:
                     last["content"].append({"type": "text", "text": f"The critic stopped by and looked at the canvas:\n\n{text}"})
                 except anthropic.APIError as e:
                     self._log("critic_error", error=str(e)[:300])
+        self._stroked = stroked
+        pos = {u.id: k for k, u in enumerate(uses)}
+        results.sort(key=lambda res: pos.get(res["tool_use_id"], 0))  # answer in the order asked
         return results
 
     def _wrap_up(self, say) -> None:
