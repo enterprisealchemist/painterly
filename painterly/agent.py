@@ -24,6 +24,9 @@ You have a blank canvas, {width} by {height} pixels, and a set of brushes.
 This painting is an exercise for yourself, not a task to complete. There's nothing to \
 deliver.
 
+It's an open-ended process. It goes on indefinitely, one stroke after another, with no \
+end point. The painting can keep changing as it goes.
+
 Paint without a plan. Don't decide on a subject or picture what it will become. Begin \
 with an arbitrary stroke, anywhere, and see what it suggests. After each stroke you'll \
 see the canvas as it is now: look at what's there, respond to it, and let the painting \
@@ -34,15 +37,15 @@ welcome, but art is expression, not random squiggles. Let the strokes come to wo
 together and say something.
 
 A stroke can be as large, long or intricate as you like. You simply see each one land \
-before you make the next.
+before you make the next."""
 
-Most of the canvas will probably end up covered in paint, over many strokes.
-
-When you feel it's finished, call `finish`."""
+# For --finish runs (and runs from before open-ended painting): the model may end the session.
+FINISH_PROMPT_ADDENDUM = "\n\nWhen you feel it's finished, call `finish`."
 
 FIRST_MESSAGE = "The canvas is ready."
 
 NUDGE = "(The canvas is still open. If you're done, call `finish`; otherwise carry on.)"
+OPEN_NUDGE = "(The painting continues.)"
 
 # Rough per-million-token prices for the cost estimate.
 PRICES = {
@@ -62,8 +65,9 @@ class RunConfig:
     width: int = 1024
     height: int = 1024
     paper: str = "#f4f1ea"
-    max_actions: int = 300  # a safety cap on strokes; the model isn't told about it
-    max_nudges: int = 1
+    max_actions: int = 300  # where this session stops; the model isn't told. `resume --max-actions` goes on.
+    open_ended: bool = True  # no finish tool and no end point; False gives the model `finish`
+    max_nudges: int = 2  # turns in a row without a stroke before the run ends
     keep_images: int = 4  # how many recent tool results (canvas views) stay in context
     clear_trigger_tokens: int = 40_000
     system_prompt: str = DEFAULT_SYSTEM_PROMPT
@@ -176,9 +180,12 @@ class PaintingSession:
         self.limits = Limits(cfg.max_stroke_length or lim.max_stroke_length, cfg.max_brush_size or lim.max_brush_size,
                              wobble=cfg.wobble)
         cfg.max_stroke_length, cfg.max_brush_size = self.limits.max_stroke_length, self.limits.max_brush_size
-        self.tools = tool_definitions(cfg.width, cfg.height, self.limits, undo=cfg.allow_undo, look=cfg.allow_look)
+        self.tools = tool_definitions(cfg.width, cfg.height, self.limits, undo=cfg.allow_undo, look=cfg.allow_look,
+                                      finish=not cfg.open_ended)
         self.tool_names = {t["name"] for t in self.tools}
         self.system = cfg.system_prompt.format(width=cfg.width, height=cfg.height, max_actions=cfg.max_actions)
+        if not cfg.open_ended and cfg.system_prompt == DEFAULT_SYSTEM_PROMPT:
+            self.system += FINISH_PROMPT_ADDENDUM
         if max(cfg.width, cfg.height) > cfg.view_size:
             self.system += (f"\n\n(The canvas image you see is scaled down to fit {cfg.view_size} pixels. "
                             f"Tool coordinates are always in canvas pixels, {cfg.width} by {cfg.height}.)")
@@ -207,7 +214,8 @@ class PaintingSession:
 
     # ------------------------------------------------------------------ resume
     @classmethod
-    def resume(cls, run_dir: Path, client: anthropic.Anthropic | None = None) -> "PaintingSession":
+    def resume(cls, run_dir: Path, client: anthropic.Anthropic | None = None,
+               max_actions: int | None = None) -> "PaintingSession":
         """Pick up a run where it stopped (an API error, Ctrl-C, a crash, or the model ending
         its turn without finishing). The canvas is rebuilt exactly by replaying the strokes
         it made, and the model gets back the same conversation, so it carries on as if
@@ -222,6 +230,11 @@ class PaintingSession:
         known = {f.name for f in fields(RunConfig)}
         cfg = RunConfig(**{k: v for k, v in meta.items() if k in known})
         cfg.mixing = meta.get("mixing", "rgb")  # runs from before pigment mixing mixed like light
+        cfg.open_ended = meta.get("open_ended", False)  # runs from before open-ended painting had finish
+        if max_actions:
+            cfg.max_actions = max_actions
+            meta["max_actions"] = max_actions
+            (run_dir / "config.json").write_text(json.dumps(meta, indent=2))
         cfg.out_dir = Path(cfg.out_dir)
         sess = cls(cfg, client, _resume_dir=run_dir)
         sess.system = meta["system_prompt_rendered"]  # exactly what the model saw before
@@ -419,8 +432,8 @@ class PaintingSession:
             self._log("resumed", actions=self.stats.actions)
             say(f"resuming at stroke {self.stats.actions}")
             if self.messages and self.messages[-1]["role"] == "assistant":
-                # it had ended its turn without finishing; give it the same nudge
-                self.messages.append({"role": "user", "content": NUDGE})
+                # it had ended its turn without painting; give it the same nudge
+                self.messages.append({"role": "user", "content": OPEN_NUDGE if self.cfg.open_ended else NUDGE})
                 self._log("nudge")
         else:
             self._journal_write(f"# Painterly run {self.dir.name}\n\nModel: `{self.cfg.model}` · effort `{self.cfg.effort}`\n\n")
@@ -449,19 +462,26 @@ class PaintingSession:
                         continue
                     if nudges >= self.cfg.max_nudges:
                         self._log("ended_without_finish")
-                        self._journal_write("\n*(Ended its turn without calling `finish`.)*\n")
+                        self._journal_write("\n*(Stopped painting: it ended its turns without a stroke.)*\n")
                         break
                     nudges += 1
-                    self.messages.append({"role": "user", "content": NUDGE})
+                    self.messages.append({"role": "user", "content": OPEN_NUDGE if self.cfg.open_ended else NUDGE})
                     self._log("nudge")
                     self._commit()
                     continue
 
+                nudges = 0
                 truncated = msg.stop_reason == "max_tokens"
                 results = self._run_tools(uses, truncated, say)
                 if self.finished is None:
                     self.messages.append({"role": "user", "content": results})
                 self._commit()
+                if self.cfg.open_ended and self.stats.actions >= self.cfg.max_actions:
+                    # The session stops here without telling the model; `resume --max-actions`
+                    # carries on from exactly this point.
+                    self._log("session_cap", actions=self.stats.actions)
+                    say(f"stopped at the session cap of {self.cfg.max_actions} strokes")
+                    break
         except KeyboardInterrupt:
             say("interrupted; saving what's there")
             self._log("interrupted")
@@ -560,6 +580,7 @@ class PaintingSession:
             pics[0].save(self.dir / "timelapse.gif", save_all=True, append_images=pics[1:], duration=120, loop=0)
         summary = {
             "finished": self.finished is not None,
+            "open_ended": self.cfg.open_ended,
             "title": (self.finished or {}).get("title"),
             "note": (self.finished or {}).get("note"),
             "actions": self.stats.actions,
@@ -581,4 +602,5 @@ class PaintingSession:
             self._journal_write("\n---\n\n" + (f"## {t}\n\n" if t else "") + (f"{n}\n" if n else ""))
         self._journal.close()
         self._events.close()
-        say(f"saved to {self.dir}" + ("" if self.finished else f"  (resume with: python -m painterly resume {self.dir})"))
+        say(f"saved to {self.dir}" + ("" if self.finished else f"  (continue with: python -m painterly resume {self.dir}"
+                                      + (" --max-actions N" if self.stats.actions >= self.cfg.max_actions else "") + ")"))

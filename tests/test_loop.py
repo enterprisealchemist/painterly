@@ -74,7 +74,7 @@ class FakeClient:
 
 def test_full_loop(tmp_path):
     client = FakeClient()
-    s = PaintingSession(RunConfig(out_dir=tmp_path, max_actions=20, allow_undo=True), client=client)
+    s = PaintingSession(RunConfig(open_ended=False, out_dir=tmp_path, max_actions=20, allow_undo=True), client=client)
     run_dir = s.run()
 
     summary = json.loads((run_dir / "summary.json").read_text())
@@ -108,7 +108,7 @@ def test_full_loop(tmp_path):
 
 def test_inline_images_without_optional_features(tmp_path):
     client = FakeClient()
-    cfg = RunConfig(out_dir=tmp_path, max_actions=10, model="claude-haiku-5-5", inline_images=True,
+    cfg = RunConfig(open_ended=False, out_dir=tmp_path, max_actions=10, model="claude-haiku-5-5", inline_images=True,
                     context_editing=False, thinking_summaries=False, view_size=768)
     PaintingSession(cfg, client=client).run()
     req = client.requests[1]
@@ -120,7 +120,7 @@ def test_inline_images_without_optional_features(tmp_path):
 
 def test_no_undo_no_look(tmp_path):
     client = FakeClient([SCRIPT[-1]])
-    cfg = RunConfig(out_dir=tmp_path, allow_look=False)  # undo is off by default
+    cfg = RunConfig(open_ended=False, out_dir=tmp_path, allow_look=False)  # undo is off by default
     PaintingSession(cfg, client=client).run()
     tools = client.requests[0]["tools"]
     assert [t["name"] for t in tools] == ["brush", "finish"]
@@ -135,7 +135,7 @@ def test_empty_refusals_are_resent(tmp_path, monkeypatch):
         "stop_reason": "refusal", "stop_sequence": None, "usage": {"input_tokens": 400, "output_tokens": 0},
     })
     client = FakeClient([empty, empty, SCRIPT[0], empty, SCRIPT[-1]])
-    run_dir = PaintingSession(RunConfig(out_dir=tmp_path, max_actions=10), client=client).run()
+    run_dir = PaintingSession(RunConfig(open_ended=False, out_dir=tmp_path, max_actions=10), client=client).run()
     summary = json.loads((run_dir / "summary.json").read_text())
     assert summary["finished"] and summary["actions"] == 1
     assert summary["empty_refusal_retries"] == 3
@@ -153,7 +153,7 @@ def test_mid_stream_unavailable_is_resent(tmp_path, monkeypatch):
         "The requested model is temporarily unavailable. Please try again later.",
         response=httpx.Response(200, request=req), body=None)
     client = FakeClient([SCRIPT[0], err, SCRIPT[-1]])
-    run_dir = PaintingSession(RunConfig(out_dir=tmp_path), client=client).run()
+    run_dir = PaintingSession(RunConfig(open_ended=False, out_dir=tmp_path), client=client).run()
     summary = json.loads((run_dir / "summary.json").read_text())
     assert summary["finished"] and summary["transient_error_retries"] == 1
     assert client.requests[1]["messages"] == client.requests[2]["messages"]
@@ -182,7 +182,7 @@ def test_resume_matches_an_uninterrupted_run(tmp_path, monkeypatch):
     from PIL import Image, ImageChops
 
     monkeypatch.setattr("painterly.agent.time.sleep", lambda s: None)
-    cfg = lambda d: RunConfig(out_dir=d, inline_images=True, seed=4)  # noqa: E731
+    cfg = lambda d: RunConfig(open_ended=False, out_dir=d, inline_images=True, seed=4)  # noqa: E731
 
     straight = FakeClient(RESUME_SCRIPT)
     ref_dir = PaintingSession(cfg(tmp_path / "a"), client=straight).run()
@@ -240,14 +240,14 @@ def test_node_paths():
 
 def test_length_limit_when_set(tmp_path):
     client = FakeClient([_msg([_brush(1, points=[[0, 0], [900, 900]])]), SCRIPT[-1]])
-    PaintingSession(RunConfig(out_dir=tmp_path, max_stroke_length=410), client=client).run()
+    PaintingSession(RunConfig(open_ended=False, out_dir=tmp_path, max_stroke_length=410), client=client).run()
     res = client.requests[1]["messages"][-1]["content"][0]
     assert res["is_error"] and "at most 410 px" in res["content"]
 
 
 def test_nothing_mentions_a_budget(tmp_path):
     client = FakeClient([SCRIPT[0], SCRIPT[-1]])
-    PaintingSession(RunConfig(out_dir=tmp_path), client=client).run()
+    PaintingSession(RunConfig(open_ended=False, out_dir=tmp_path), client=client).run()
     sent = json.dumps([client.requests[1]["system"], client.requests[1]["tools"],
                        client.requests[1]["messages"]], default=str).lower()
     for word in ("300", "strokes left", "budget", "remaining", "up to 300"):
@@ -309,3 +309,34 @@ def test_wet_brush_drags_paint_and_angle_shapes_the_mark():
     across = width(90, [[50, 200], [350, 200]])  # vertical edge moving sideways: full width
     along = width(0, [[50, 200], [350, 200]])  # horizontal edge moving sideways: thin
     assert across > 90 and along < 20
+
+
+def test_open_ended_has_no_finish_and_stops_quietly_at_the_cap(tmp_path, monkeypatch):
+    monkeypatch.setattr("painterly.agent.time.sleep", lambda s: None)
+    strokes = [_msg([_brush(i, points=[[50 + 40 * i, 100], [50 + 40 * i, 400]], size=20)]) for i in range(1, 7)]
+    client = FakeClient(strokes[:3])
+    run_dir = PaintingSession(RunConfig(out_dir=tmp_path, max_actions=3, inline_images=True), client=client).run()
+    req = client.requests[0]
+    assert [t["name"] for t in req["tools"]] == ["brush", "look"]
+    assert "finish" not in req["system"] and "indefinitely" in req["system"]
+    sent = json.dumps([r["messages"] for r in client.requests], default=str).lower()
+    assert "finish" not in sent and "left" not in sent
+    summary = json.loads((run_dir / "summary.json").read_text())
+    assert summary["actions"] == 3 and not summary["finished"] and summary["open_ended"]
+    assert len(client.requests) == 3  # stopped right after the third stroke, without telling it
+
+    # carrying on: the model simply gets its next turn
+    more = FakeClient(strokes[3:])
+    PaintingSession.resume(run_dir, client=more, max_actions=6).run()
+    assert json.loads((run_dir / "summary.json").read_text())["actions"] == 6
+    assert len(more.requests[0]["messages"]) == len(client.requests[2]["messages"]) + 2
+
+
+def test_open_ended_nudges_then_stops_when_it_stops_painting(tmp_path):
+    quiet = _msg([{"type": "text", "text": "Looking."}], stop="end_turn")
+    client = FakeClient([SCRIPT[0], quiet, _msg([_brush(9)]), quiet, quiet, quiet])
+    run_dir = PaintingSession(RunConfig(out_dir=tmp_path), client=client).run()
+    nudges = [m for r in client.requests for m in r["messages"][-1:] if m["content"] == "(The painting continues.)"]
+    assert nudges  # neutral nudge, no mention of finishing
+    assert json.loads((run_dir / "summary.json").read_text())["actions"] == 2
+    assert len(client.requests) == 6  # one pause forgiven; then two nudges in a row and it ends

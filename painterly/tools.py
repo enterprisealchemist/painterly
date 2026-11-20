@@ -28,7 +28,8 @@ class Limits:
         return cls(round(side * stroke_frac) if stroke_frac else None, round(side * brush_frac))
 
 
-def tool_definitions(width: int, height: int, limits: Limits | None = None, undo: bool = True, look: bool = True) -> list[dict[str, Any]]:
+def tool_definitions(width: int, height: int, limits: Limits | None = None, undo: bool = True, look: bool = True,
+                     finish: bool = True) -> list[dict[str, Any]]:
     lim = limits or Limits.for_canvas(width, height)
     coord = f"Canvas pixels: x 0..{width} left to right, y 0..{height} top to bottom."
     tools: list[dict[str, Any]] = [
@@ -119,19 +120,20 @@ def tool_definitions(width: int, height: int, limits: Limits | None = None, undo
             },
             "eager_input_streaming": True,
         })
-    tools.append({
-        "name": "finish",
-        "description": "Call this when you feel the painting is finished. Title and note are optional.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "title": {"type": "string"},
-                "note": {"type": "string", "description": "Anything you want to say about it, or nothing."},
+    if finish:
+        tools.append({
+            "name": "finish",
+            "description": "Call this when you feel the painting is finished. Title and note are optional.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                    "note": {"type": "string", "description": "Anything you want to say about it, or nothing."},
+                },
+                "additionalProperties": False,
             },
-            "additionalProperties": False,
-        },
-        "eager_input_streaming": True,
-    })
+            "eager_input_streaming": True,
+        })
     return tools
 
 

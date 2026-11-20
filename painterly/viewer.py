@@ -58,7 +58,9 @@ def build_steps(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
         elif k == "refusal":
             pending.append({"type": "system", "text": "The model declined to continue."})
         elif k == "ended_without_finish":
-            pending.append({"type": "system", "text": "It ended its turn again without calling finish, so the run ended."})
+            pending.append({"type": "system", "text": "It stopped making strokes, even after being nudged, so the session ended."})
+        elif k == "session_cap":
+            pending.append({"type": "system", "text": "The session stopped here at its stroke cap, which the model wasn't told about. The painting can be continued with resume."})
     steps.append({"frame": last_frame, "kind": "end", "notes": pending, "finish": finish})
     return steps
 
@@ -86,6 +88,7 @@ def write_viewer(run_dir: Path, out: Path | None = None, max_side: int = 900) ->
             "undo": cfg.get("allow_undo"),
             "system_prompt": cfg.get("system_prompt_rendered"),
             "finished": summary.get("finished"),
+            "open_ended": summary.get("open_ended", False),
             "title": summary.get("title"),
             "note": summary.get("note"),
             "strokes": summary.get("actions"),

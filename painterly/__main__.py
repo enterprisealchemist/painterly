@@ -19,7 +19,9 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--size", default=f"{RunConfig.width}x{RunConfig.height}", help="canvas WxH, e.g. 1024x768")
     r.add_argument("--paper", default=RunConfig.paper, help="paper colour (hex)")
     r.add_argument("--max-actions", type=int, default=RunConfig.max_actions,
-                   help="safety cap on strokes (default 300); the model isn't told about it")
+                   help="where this session stops (default 300); the model isn't told. Resume to go on.")
+    r.add_argument("--finish", action="store_true",
+                   help="give the model a finish tool and tell it to call it when done (default: open-ended)")
     r.add_argument("--keep-images", type=int, default=RunConfig.keep_images, help="recent canvas views kept in context")
     r.add_argument("--prompt", type=Path, help="file with a replacement system prompt ({width} {height} {max_actions} are filled in)")
     r.add_argument("--out", type=Path, default=RunConfig.out_dir)
@@ -49,6 +51,7 @@ def main(argv: list[str] | None = None) -> int:
 
     rs = sub.add_parser("resume", help="carry on a run that stopped before the model finished")
     rs.add_argument("run_dir", type=Path)
+    rs.add_argument("--max-actions", type=int, help="raise the session's stroke cap to keep an open-ended painting going")
 
     v = sub.add_parser("viewer", help="write a self-contained HTML page to step through a run's strokes")
     v.add_argument("run_dir", type=Path)
@@ -72,7 +75,7 @@ def main(argv: list[str] | None = None) -> int:
     if a.cmd == "resume":
         from .agent import PaintingSession
 
-        session = PaintingSession.resume(a.run_dir)
+        session = PaintingSession.resume(a.run_dir, max_actions=a.max_actions)
         out = session.run(on_event=lambda s: print("  " + s, flush=True))
         print((out / "summary.json").read_text())
         return 0
@@ -121,6 +124,7 @@ def main(argv: list[str] | None = None) -> int:
             allow_undo=a.undo,
             wobble=a.wobble,
             mixing=a.mixing,
+            open_ended=not a.finish,
             allow_look=not a.no_look,
             view_size=a.view_size or (768 if a.inline_images else 1024),
             **({"system_prompt": a.prompt.read_text()} if a.prompt else {}),

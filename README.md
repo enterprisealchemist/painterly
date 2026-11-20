@@ -13,7 +13,8 @@ choice is entirely its own.
 pip install -e .            # or: pip install -r requirements.txt
 export ANTHROPIC_API_KEY=... # or `ant auth login`
 
-python -m painterly run                     # one session (safety cap: 300 strokes, never shown to the model)
+python -m painterly run                     # an open-ended session; this one stops after 300 strokes
+python -m painterly resume runs/<id> --max-actions 600  # ...and carries on
 python -m painterly run --runs 5 --seed 10  # five independent sessions
 python -m painterly sampler -o brushes.png  # brush reference sheet, no API calls
 python -m painterly resume runs/<id>        # carry on a run that stopped early
@@ -70,8 +71,9 @@ system prompt (no brief)  ─▶  model  ─▶ tool calls ─▶ canvas engine
         └──────── tool results + current canvas image ◀────┘
 ```
 
-The run ends when the model calls `finish`, uses up its action budget, or ends a turn
-without acting twice in a row (it gets one neutral nudge first).
+It never ends from the model's side. A session stops at its stroke cap (`--max-actions`),
+or when the model stops making strokes even after two neutral nudges, and `resume` can
+continue it. With `--finish`, the model can also end it by calling `finish`.
 
 ### Tools
 
@@ -80,7 +82,7 @@ without acting twice in a row (it gets one neutral nudge first).
 | `brush` | one brushstroke: touch down, move, lift off |
 | `look` | lean in and look closely at a region (doesn't change the canvas; `--no-look` removes it) |
 | `undo` | off by default, so every stroke is final; `--undo` adds it |
-| `finish` | end the session, with an optional title and note |
+| `finish` | only with `--finish`: end the session, with an optional title and note |
 
 There's no fill. Everything is made of brushstrokes. A `brush` call takes:
 
@@ -149,6 +151,12 @@ and easy to change:
   exercise for the model itself, with nothing to deliver. It asks it not to choose a
   subject, but to start with an arbitrary stroke and respond to what's on the canvas
   after each one. It's told that a stroke can be as large or intricate as it likes.
+- **Open-ended.** The prompt says painting goes on indefinitely with no end point. There
+  is no `finish` tool, and nothing mentions finishing. A session stops quietly after
+  `--max-actions` strokes, or if the model stops making strokes even after a neutral
+  "(The painting continues.)". The model isn't told either way, and `resume --max-actions`
+  carries on from exactly that point. `--finish` brings back the old mode, where the model
+  decides when it's done.
 - **Compose something.** Abstraction is welcome, but the prompt asks for expression, with
   the strokes working together, rather than random marks.
 - **A coverage expectation, not a target.** The prompt says most of the canvas will
@@ -158,8 +166,7 @@ and easy to change:
 - **Nothing about an audience.** The prompt doesn't say anyone will look at the painting,
   and it doesn't say nobody will.
 - **No budget in sight.** The model isn't told how many strokes it has, and there's no
-  countdown. A safety cap (`--max-actions`, default 300) exists, and it's only mentioned
-  if the model reaches it. Earlier runs that showed the budget used about half of it and
+  countdown. Earlier runs that showed the budget used about half of it and
   planned to that size from the first thought.
 - **The tools do what they say.** Every brush is `size` wide at full pressure. The
   descriptions match the rendering, including the slight hand wobble, so the model
