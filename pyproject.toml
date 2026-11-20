@@ -14,5 +14,8 @@ painterly = "painterly.__main__:main"
 [tool.setuptools]
 packages = ["painterly"]
 
+[tool.setuptools.package-data]
+painterly = ["viewer_template.html"]
+
 [tool.pytest.ini_options]
 pythonpath = ["."]

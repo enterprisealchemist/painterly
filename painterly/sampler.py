@@ -10,7 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from .canvas import BRUSHES, Canvas
-from .tools import apply_tool
+from .tools import Limits, apply_tool
 
 VARIANTS = [
     dict(curvature=0.0, pressure=[0.1, 1, 1, 0.1], color="#1d3557"),
@@ -23,11 +23,12 @@ def render_sampler(out: Path) -> None:
     names = list(BRUSHES)
     c = Canvas(1024, 110 + 100 * len(names), seed=1)
     seed = 0
+    limits = Limits(410, 154, wobble=1.0)  # what a run uses on a 1024 canvas
 
     def brush(**kw):
         nonlocal seed
         seed += 1
-        apply_tool(c, "brush", kw, seed)
+        apply_tool(c, "brush", kw, seed, limits)
 
     for i, name in enumerate(names):
         y = 95 + i * 100

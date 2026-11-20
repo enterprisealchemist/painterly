@@ -5,7 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from .canvas import BLEND_MODES, BRUSHES, Canvas, arc_length, arc_path, hex_to_rgb
+import numpy as np
+
+from .canvas import BLEND_MODES, BRUSHES, Canvas, arc_length, arc_path, hand_wobble, hex_to_rgb
 
 _brush_list = "\n".join(f"- {b.name}: {b.description}" for b in BRUSHES.values())
 
@@ -18,6 +20,7 @@ class Limits:
 
     max_stroke_length: float
     max_brush_size: float
+    wobble: float = 0.0  # natural hand wobble (see canvas.hand_wobble); runs set 1.0 by default
 
     @classmethod
     def for_canvas(cls, width: int, height: int, stroke_frac: float = 0.4, brush_frac: float = 0.15) -> "Limits":
@@ -213,6 +216,8 @@ def apply_tool(canvas: Canvas, name: str, args: dict[str, Any], rng_seed: int, l
         dilution = _num(args, "dilution", 0, 0.95, 0.0)
         step = float(min(10.0, max(1.5, size * 0.175)))
         path, _ = arc_path(start, end, curvature, step)
+        if lim.wobble > 0:
+            path = hand_wobble(path, length, np.random.default_rng([rng_seed, 7919]), lim.wobble)
         kw = dict(points=path.tolist(), brush=brush, color=color, size=size, opacity=1.0 - dilution,
                   taper_in=0.0, taper_out=0.0, fade=1.0 - load, pressure=pressure, dense=True, seed=rng_seed)
         canvas.checkpoint()

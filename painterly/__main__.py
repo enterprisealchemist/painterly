@@ -39,9 +39,17 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--no-thinking-summaries", action="store_true", help="don't request thinking summaries")
     r.add_argument("--max-stroke-length", type=float, help="longest single stroke in px, along its arc (default 40%% of the longer side)")
     r.add_argument("--max-brush-size", type=float, help="widest brush in px (default 15%% of the longer side)")
-    r.add_argument("--no-undo", action="store_true", help="every stroke is final")
+    r.add_argument("--undo", action="store_true", help="give it an undo tool (off by default: every stroke is final)")
+    r.add_argument("--wobble", type=float, default=RunConfig.wobble, help="natural hand wobble, 0 for perfectly geometric strokes (default 1)")
     r.add_argument("--no-look", action="store_true", help="no zooming in on the canvas")
     r.add_argument("--view-size", type=int, help="longest side of the image the model sees (default 1024; 768 with --inline-images)")
+
+    rs = sub.add_parser("resume", help="carry on a run that stopped before the model finished")
+    rs.add_argument("run_dir", type=Path)
+
+    v = sub.add_parser("viewer", help="write a self-contained HTML page to step through a run's strokes")
+    v.add_argument("run_dir", type=Path)
+    v.add_argument("-o", "--output", type=Path, help="default: <run_dir>/viewer.html")
 
     p = sub.add_parser("replay", help="re-render a run from its event log")
     p.add_argument("run_dir", type=Path)
@@ -56,6 +64,20 @@ def main(argv: list[str] | None = None) -> int:
         from .replay import replay
 
         print(replay(a.run_dir, a.output))
+        return 0
+
+    if a.cmd == "resume":
+        from .agent import PaintingSession
+
+        session = PaintingSession.resume(a.run_dir)
+        out = session.run(on_event=lambda s: print("  " + s, flush=True))
+        print((out / "summary.json").read_text())
+        return 0
+
+    if a.cmd == "viewer":
+        from .viewer import write_viewer
+
+        print(write_viewer(a.run_dir, a.output))
         return 0
 
     if a.cmd == "sampler":
@@ -93,7 +115,8 @@ def main(argv: list[str] | None = None) -> int:
             thinking_summaries=not a.no_thinking_summaries,
             max_stroke_length=a.max_stroke_length,
             max_brush_size=a.max_brush_size,
-            allow_undo=not a.no_undo,
+            allow_undo=a.undo,
+            wobble=a.wobble,
             allow_look=not a.no_look,
             view_size=a.view_size or (768 if a.inline_images else 1024),
             **({"system_prompt": a.prompt.read_text()} if a.prompt else {}),

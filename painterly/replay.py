@@ -13,7 +13,9 @@ def replay(run_dir: Path, out: Path | None = None) -> Path:
     cfg = json.loads((run_dir / "config.json").read_text())
     canvas = Canvas(cfg["width"], cfg["height"], paper=cfg["paper"], seed=cfg["seed"])
     default = Limits.for_canvas(cfg["width"], cfg["height"])
-    limits = Limits(cfg.get("max_stroke_length") or default.max_stroke_length, cfg.get("max_brush_size") or default.max_brush_size)
+    limits = Limits(cfg.get("max_stroke_length") or default.max_stroke_length,
+                    cfg.get("max_brush_size") or default.max_brush_size,
+                    wobble=cfg.get("wobble", 0.0))  # runs from before wobble existed had none
     for line in (run_dir / "events.jsonl").read_text().splitlines():
         ev = json.loads(line)
         if ev["kind"] != "tool" or ev["tool"] in ("look", "finish"):

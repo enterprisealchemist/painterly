@@ -16,8 +16,21 @@ export ANTHROPIC_API_KEY=... # or `ant auth login`
 python -m painterly run                     # one session, 150 strokes max
 python -m painterly run --runs 5 --seed 10  # five independent sessions
 python -m painterly sampler -o brushes.png  # brush reference sheet, no API calls
+python -m painterly resume runs/<id>        # carry on a run that stopped early
+python -m painterly viewer runs/<id>        # HTML page to step through it, stroke by stroke
 python -m painterly replay runs/<id>        # re-render a run from its log
 ```
+
+Runs are resumable. After every turn the conversation (`conversation.jsonl`, with inline
+canvas views under `views/`) and the loop state (`state.json`) are saved. If a run stops
+because of an API error, Ctrl-C, a crash, or the model ending its turn without finishing,
+`resume` picks it up:
+- The canvas is rebuilt exactly from the strokes made so far.
+- The model gets back exactly the conversation it had.
+- A turn interrupted halfway is redone.
+
+With the Files API, uploaded canvas views expire after two days, so resume within that
+window; `--inline-images` runs have no such limit.
 
 ### Through a proxy or reseller
 
@@ -66,7 +79,7 @@ without acting twice in a row (it gets one neutral nudge first).
 |---|---|
 | `brush` | one brushstroke: touch down, move, lift off |
 | `look` | lean in and look closely at a region (doesn't change the canvas; `--no-look` removes it) |
-| `undo` | take back recent strokes (`--no-undo` makes every stroke final) |
+| `undo` | off by default, so every stroke is final; `--undo` adds it |
 | `finish` | end the session, with an optional title and note |
 
 There's no fill, no shapes and no way to send a path. A `brush` call takes:
@@ -120,9 +133,9 @@ and easy to change:
   model an artist. Even naming a brush "watercolor" nudges it, but some vocabulary is
   unavoidable. Use `--prompt my_prompt.txt` to compare framings, and see `config.json` for
   the exact text each run got.
-- **It's told the truth.** The prompt says this is an experiment, that the output is saved
-  and might be looked at, and that there are no expectations. Pretending nobody is
-  watching would be dishonest, and it would also weaken the experiment.
+- **Nothing about an audience.** The prompt doesn't say anyone will look at the painting,
+  and it doesn't say nobody will. It only says the canvas is the model's to do with as it
+  likes.
 - **Stopping, including stopping immediately, is allowed.** An empty canvas is a valid
   result.
 - **Memory is short-term.** Only the last few canvas views stay in context (`--keep-images`,
@@ -130,7 +143,10 @@ and easy to change:
   painter, it sees the canvas as it is now, not every earlier state.
 - **It paints like a person.** One stroke per turn, with no fills or shapes, and strokes
   only as long as an arm can sweep. It has to build up every area mark by mark.
-- **Undo exists.** Use `--no-undo` if you want every mark to be final.
+- **No undo.** Every stroke is final, as on a real canvas (`--undo` to change that).
+- **An unsteady hand.** Each stroke drifts slightly off its ideal arc, by about 1% of its
+  length and never more than 5 px. The drift is smooth, random and seeded, so replays are
+  exact, and it's zero at both ends. `--wobble 0` turns it off.
 - **Run it many times.** One painting is an anecdote. With `--runs N` you can look for what
   recurs across sessions: subjects, palettes, compositions, and when it decides to stop.
 

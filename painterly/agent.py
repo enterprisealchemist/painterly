@@ -6,8 +6,9 @@ import base64
 import io
 import json
 import os
+import hashlib
 import time
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any
 
@@ -20,17 +21,11 @@ from .tools import MARKING_TOOLS, Limits, ToolError, apply_tool, tool_definition
 DEFAULT_SYSTEM_PROMPT = """\
 You have a blank canvas, {width} by {height} pixels, and a set of brushes.
 
-Nothing is being asked of you. There is no brief, no client and no one to please. \
-You can paint anything you like, in any way you like, or nothing at all. You decide \
-what this is and when it's finished; that includes stopping right away.
+You're free to do whatever you like with it, in any way you like, or nothing at all. \
+You decide what this is and when it's finished.
 
 You paint one stroke at a time, and after each stroke you'll see the canvas as it is \
-now. You have up to {max_actions} strokes. When you're done, call `finish`.
-
-For transparency: this is an experiment by someone curious what you'd make when the \
-choice is entirely yours. The canvas, your tool calls and anything you write along the \
-way are saved, and they may look at them later. They have no expectations about what \
-you'll make."""
+now. You have up to {max_actions} strokes. When you're done, call `finish`."""
 
 FIRST_MESSAGE = "The canvas is ready."
 
@@ -72,11 +67,12 @@ class RunConfig:
     view_size: int = 1024  # longest side of the canvas image the model sees
     max_stroke_length: float | None = None  # px along the arc; default 40% of the longer side
     max_brush_size: float | None = None  # px; default 15% of the longer side
-    allow_undo: bool = True
+    allow_undo: bool = False  # every stroke is final, as on a real canvas
     allow_look: bool = True
     one_call_per_turn: bool = True  # brush, see the canvas, repeat
     empty_refusal_retries: int = 6
-    transient_retries: int = 8  # resend after mid-stream overload/unavailable errors  # resend when a backend returns an empty "refusal" (see is_empty_refusal)
+    transient_retries: int = 8  # resend after mid-stream overload/unavailable errors
+    wobble: float = 1.0  # natural hand wobble on each stroke; 0 = perfectly geometric
 
 
 def is_empty_refusal(msg) -> bool:
@@ -140,13 +136,29 @@ def _jpeg(img: Image.Image, quality: int = 90) -> bytes:
     return buf.getvalue()
 
 
+try:  # exactly how the SDK serialises a response block when it is sent back in a request
+    from anthropic._utils._json import openapi_model_dump as _dump_model
+except ImportError:  # pragma: no cover - private helper moved; to_dict is the documented near-equivalent
+    def _dump_model(b: Any) -> dict[str, Any]:
+        return b.to_dict(mode="json")
+
+
+def _block_dict(b: Any) -> Any:
+    return _dump_model(b) if hasattr(b, "model_dump") else b
+
+
 class PaintingSession:
-    def __init__(self, cfg: RunConfig, client: anthropic.Anthropic | None = None):
+    """One painting session. Everything needed to pick it up again is written to its
+    directory after every turn: the conversation (`conversation.jsonl`, with inline canvas
+    views stored as files under `views/`) and the loop state (`state.json`). See `resume`."""
+
+    def __init__(self, cfg: RunConfig, client: anthropic.Anthropic | None = None, *, _resume_dir: Path | None = None):
         self.cfg = cfg
         self.client = client or make_client(cfg)
         self.canvas = Canvas(cfg.width, cfg.height, paper=cfg.paper, seed=cfg.seed)
         lim = Limits.for_canvas(cfg.width, cfg.height)
-        self.limits = Limits(cfg.max_stroke_length or lim.max_stroke_length, cfg.max_brush_size or lim.max_brush_size)
+        self.limits = Limits(cfg.max_stroke_length or lim.max_stroke_length, cfg.max_brush_size or lim.max_brush_size,
+                             wobble=cfg.wobble)
         cfg.max_stroke_length, cfg.max_brush_size = self.limits.max_stroke_length, self.limits.max_brush_size
         self.tools = tool_definitions(cfg.width, cfg.height, self.limits, undo=cfg.allow_undo, look=cfg.allow_look)
         self.tool_names = {t["name"] for t in self.tools}
@@ -157,20 +169,133 @@ class PaintingSession:
         self.stats = RunStats()
         self.messages: list[Any] = []
         self.finished: dict[str, Any] | None = None
+        self._seed_counter = cfg.seed * 1_000_003
+        self._view_paths: dict[str, str] = {}  # sha1 of base64 data -> file under views/
+        self._committed = 0  # messages already in conversation.jsonl
+        self._event_count = 0
+        self.resumed = _resume_dir is not None
+        if self.resumed:
+            self.dir = _resume_dir
+            self._load()
+            return
         stamp = time.strftime("%Y%m%d-%H%M%S")
         self.dir = cfg.out_dir / stamp
         (self.dir / "frames").mkdir(parents=True, exist_ok=True)
+        (self.dir / "views").mkdir(exist_ok=True)
         self._journal = open(self.dir / "journal.md", "w", encoding="utf-8")
         self._events = open(self.dir / "events.jsonl", "w", encoding="utf-8")
-        self._seed_counter = cfg.seed * 1_000_003
+        (self.dir / "conversation.jsonl").write_text("")
         meta = {k: (str(v) if isinstance(v, Path) else v) for k, v in cfg.__dict__.items()}
         meta["system_prompt_rendered"] = self.system
         (self.dir / "config.json").write_text(json.dumps(meta, indent=2))
+
+    # ------------------------------------------------------------------ resume
+    @classmethod
+    def resume(cls, run_dir: Path, client: anthropic.Anthropic | None = None) -> "PaintingSession":
+        """Pick up a run where it stopped (an API error, Ctrl-C, a crash, or the model ending
+        its turn without finishing). The canvas is rebuilt exactly by replaying the strokes
+        it made, and the model gets back the same conversation, so it carries on as if
+        nothing happened."""
+        run_dir = Path(run_dir)
+        meta = json.loads((run_dir / "config.json").read_text())
+        state_path = run_dir / "state.json"
+        if not state_path.exists():
+            raise SystemExit(f"{run_dir} has no state.json (made before runs were resumable)")
+        if json.loads(state_path.read_text()).get("finished") is not None:
+            raise SystemExit(f"{run_dir} is already finished")
+        known = {f.name for f in fields(RunConfig)}
+        cfg = RunConfig(**{k: v for k, v in meta.items() if k in known})
+        cfg.out_dir = Path(cfg.out_dir)
+        sess = cls(cfg, client, _resume_dir=run_dir)
+        sess.system = meta["system_prompt_rendered"]  # exactly what the model saw before
+        return sess
+
+    def _load(self) -> None:
+        state = json.loads((self.dir / "state.json").read_text())
+        self.stats = RunStats(**state["stats"])
+        self._seed_counter = state["seed_counter"]
+        self._view_paths = state.get("view_paths", {})
+        # Keep only the events of completed turns, and rebuild the canvas from them.
+        lines = (self.dir / "events.jsonl").read_text().splitlines()[: state["events"]]
+        (self.dir / "events.jsonl").write_text("".join(line + "\n" for line in lines))
+        self._event_count = len(lines)
+        for line in lines:
+            ev = json.loads(line)
+            if ev["kind"] == "tool" and ev["tool"] in MARKING_TOOLS:
+                apply_tool(self.canvas, ev["tool"], ev["input"], ev["seed"], self.limits)
+        for f in (self.dir / "frames").glob("*.png"):
+            if int(f.stem) > self.stats.actions:
+                f.unlink()
+        for line in (self.dir / "conversation.jsonl").read_text().splitlines()[: state["messages"]]:
+            self.messages.append(self._restore_message(json.loads(line)))
+        self._committed = len(self.messages)
+        self._journal = open(self.dir / "journal.md", "a", encoding="utf-8")
+        self._events = open(self.dir / "events.jsonl", "a", encoding="utf-8")
+
+    def _store_message(self, m: dict[str, Any]) -> dict[str, Any]:
+        content = m["content"]
+        if isinstance(content, str):
+            return dict(m)
+        return {"role": m["role"], "content": [self._store_block(_block_dict(b)) for b in content]}
+
+    def _store_block(self, b: dict[str, Any]) -> dict[str, Any]:
+        if b.get("type") == "image" and b.get("source", {}).get("type") == "base64":
+            path = self._view_paths[hashlib.sha1(b["source"]["data"].encode()).hexdigest()]
+            return {**b, "source": {**b["source"], "data": None, "data_file": path}}
+        if b.get("type") == "tool_result" and isinstance(b.get("content"), list):
+            return {**b, "content": [self._store_block(_block_dict(c)) for c in b["content"]]}
+        return b
+
+    def _restore_message(self, m: dict[str, Any]) -> dict[str, Any]:
+        if isinstance(m["content"], str):
+            return m
+        return {"role": m["role"], "content": [self._restore_block(b) for b in m["content"]]}
+
+    def _restore_block(self, b: dict[str, Any]) -> dict[str, Any]:
+        src = b.get("source") or {}
+        if b.get("type") == "image" and "data_file" in src:
+            data = base64.standard_b64encode((self.dir / src["data_file"]).read_bytes()).decode()
+            return {**b, "source": {"type": "base64", "media_type": src["media_type"], "data": data}}
+        if b.get("type") == "tool_result" and isinstance(b.get("content"), list):
+            return {**b, "content": [self._restore_block(c) for c in b["content"]]}
+        return b
+
+    def _commit(self) -> None:
+        """Write completed turns to disk. A model turn whose tool calls haven't been answered
+        yet is held back, together with any strokes it made, so a resume redoes that turn."""
+        n = len(self.messages)
+        last = self.messages[-1] if self.messages else None
+        if last and last["role"] == "assistant" and any(
+            _block_dict(b).get("type") == "tool_use" for b in last["content"]
+        ):
+            n -= 1
+            if self.finished is not None:
+                n += 1  # finish needs no answer
+        if n > self._committed or not (self.dir / "state.json").exists():
+            with open(self.dir / "conversation.jsonl", "a", encoding="utf-8") as f:
+                for m in self.messages[self._committed : n]:
+                    f.write(json.dumps(self._store_message(m), default=str) + "\n")
+            self._committed = n
+            self._committed_events = self._event_count
+            self._committed_stats = asdict(self.stats)
+            self._committed_seed = self._seed_counter
+        state = {
+            "messages": self._committed,
+            "events": self._committed_events,
+            "stats": self._committed_stats,
+            "seed_counter": self._committed_seed,
+            "view_paths": self._view_paths,
+            "finished": self.finished,
+        }
+        tmp = self.dir / "state.json.tmp"
+        tmp.write_text(json.dumps(state))
+        tmp.replace(self.dir / "state.json")
 
     # ------------------------------------------------------------------ logging
     def _log(self, kind: str, **data: Any) -> None:
         self._events.write(json.dumps({"t": time.time(), "kind": kind, **data}, default=str) + "\n")
         self._events.flush()
+        self._event_count += 1
 
     def _journal_write(self, text: str) -> None:
         self._journal.write(text)
@@ -192,8 +317,11 @@ class PaintingSession:
             img.thumbnail((self.cfg.view_size, self.cfg.view_size), Image.LANCZOS)
         if self.cfg.inline_images:
             data = _jpeg(img, quality=82)
-            return {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg",
-                                                "data": base64.standard_b64encode(data).decode()}}
+            b64 = base64.standard_b64encode(data).decode()
+            rel = f"views/{name}.jpg"
+            (self.dir / rel).write_bytes(data)
+            self._view_paths[hashlib.sha1(b64.encode()).hexdigest()] = rel
+            return {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}}
         data = _jpeg(img)
         try:
             meta = self.client.files.upload(
@@ -269,11 +397,23 @@ class PaintingSession:
     # ------------------------------------------------------------------ loop
     def run(self, on_event=None) -> Path:
         say = on_event or (lambda s: None)
-        self._journal_write(f"# Painterly run {self.dir.name}\n\nModel: `{self.cfg.model}` · effort `{self.cfg.effort}`\n\n")
-        self._save_frame()
-        self.messages.append(
-            {"role": "user", "content": [self._image_block(self.canvas.image(), "frame-0000"), {"type": "text", "text": FIRST_MESSAGE}]}
-        )
+        if self.resumed:
+            self._journal_write(f"\n*(Resumed at stroke {self.stats.actions}.)*\n\n")
+            self._log("resumed", actions=self.stats.actions)
+            say(f"resuming at stroke {self.stats.actions}")
+            if self.messages and self.messages[-1]["role"] == "assistant":
+                # it had ended its turn without finishing; give it the same nudge
+                self.messages.append({"role": "user", "content": NUDGE})
+                self._log("nudge")
+        else:
+            self._journal_write(f"# Painterly run {self.dir.name}\n\nModel: `{self.cfg.model}` · effort `{self.cfg.effort}`\n\n")
+            self._save_frame()
+            self.messages.append(
+                {"role": "user", "content": [self._image_block(self.canvas.image(), "frame-0000"), {"type": "text", "text": FIRST_MESSAGE}]}
+            )
+        self._committed_events, self._committed_stats, self._committed_seed = (
+            self._event_count, asdict(self.stats), self._seed_counter)
+        self._commit()
         nudges = 0
         try:
             while self.finished is None:
@@ -297,17 +437,23 @@ class PaintingSession:
                     nudges += 1
                     self.messages.append({"role": "user", "content": NUDGE})
                     self._log("nudge")
+                    self._commit()
                     continue
 
                 truncated = msg.stop_reason == "max_tokens"
                 results = self._run_tools(uses, truncated, say)
-                self.messages.append({"role": "user", "content": results})
+                if self.finished is None:
+                    self.messages.append({"role": "user", "content": results})
+                self._commit()
         except KeyboardInterrupt:
             say("interrupted; saving what's there")
             self._log("interrupted")
         except anthropic.APIStatusError as e:
             say(f"API error {e.status_code}: {e.message}")
             self._log("api_error", status=e.status_code, message=str(e.message))
+        except anthropic.APIConnectionError as e:
+            say(f"connection error: {e}")
+            self._log("api_error", status=None, message=str(e))
         finally:
             self._wrap_up(say)
         return self.dir
@@ -388,6 +534,7 @@ class PaintingSession:
         return results
 
     def _wrap_up(self, say) -> None:
+        self._commit()
         img = self.canvas.image()
         img.save(self.dir / "final.png")
         frames = sorted((self.dir / "frames").glob("*.png"))
@@ -417,4 +564,4 @@ class PaintingSession:
             self._journal_write("\n---\n\n" + (f"## {t}\n\n" if t else "") + (f"{n}\n" if n else ""))
         self._journal.close()
         self._events.close()
-        say(f"saved to {self.dir}")
+        say(f"saved to {self.dir}" + ("" if self.finished else f"  (resume with: python -m painterly resume {self.dir})"))

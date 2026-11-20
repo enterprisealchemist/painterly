@@ -209,6 +209,28 @@ def arc_path(start, end, curvature: float = 0.0, step: float = 2.0) -> tuple[np.
     return centre + R * (np.cos(phi) * nrm + np.sin(phi) * e), length
 
 
+def hand_wobble(path: np.ndarray, length: float, rng: np.random.Generator, amount: float = 1.0) -> np.ndarray:
+    """Displace a path sideways by a smooth, low-frequency drift, like an unsteady hand.
+
+    Up to ~1.2% of the stroke's length (at most 5 px at amount=1), made of two slow sine
+    waves with random phase. It is zero at both ends, so the stroke still starts and ends
+    where it was asked to.
+    """
+    if amount <= 0 or len(path) < 3 or length < 4:
+        return path
+    seg = np.linalg.norm(np.diff(path, axis=0), axis=1)
+    t = np.concatenate([[0.0], np.cumsum(seg)]) / max(seg.sum(), 1e-9)
+    tangent = np.gradient(path, axis=0)
+    tangent /= np.maximum(np.linalg.norm(tangent, axis=1, keepdims=True), 1e-9)
+    normal = np.stack([-tangent[:, 1], tangent[:, 0]], axis=1)
+    f1, f2 = rng.uniform(0.4, 1.3), rng.uniform(1.8, 3.5)
+    p1, p2 = rng.uniform(0, 2 * np.pi, 2)
+    wave = 0.65 * np.sin(2 * np.pi * f1 * t + p1) + 0.35 * np.sin(2 * np.pi * f2 * t + p2)
+    envelope = np.clip(np.sin(np.pi * t), 0.0, 1.0) ** 0.7
+    amp = amount * min(0.012 * length, 5.0)
+    return path + normal * (amp * wave * envelope)[:, None]
+
+
 def arc_length(start, end, curvature: float = 0.0) -> float:
     c2 = math.dist(start, end)
     k = abs(float(np.clip(curvature, -1.0, 1.0)))

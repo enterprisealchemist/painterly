@@ -73,7 +73,7 @@ class FakeClient:
 
 def test_full_loop(tmp_path):
     client = FakeClient()
-    s = PaintingSession(RunConfig(out_dir=tmp_path, max_actions=20), client=client)
+    s = PaintingSession(RunConfig(out_dir=tmp_path, max_actions=20, allow_undo=True), client=client)
     run_dir = s.run()
 
     summary = json.loads((run_dir / "summary.json").read_text())
@@ -119,7 +119,7 @@ def test_inline_images_without_optional_features(tmp_path):
 
 def test_no_undo_no_look(tmp_path):
     client = FakeClient([SCRIPT[-1]])
-    cfg = RunConfig(out_dir=tmp_path, allow_undo=False, allow_look=False, max_stroke_length=200)
+    cfg = RunConfig(out_dir=tmp_path, allow_look=False, max_stroke_length=200)  # undo is off by default
     PaintingSession(cfg, client=client).run()
     tools = client.requests[0]["tools"]
     assert [t["name"] for t in tools] == ["brush", "finish"]
@@ -155,3 +155,68 @@ def test_mid_stream_unavailable_is_resent(tmp_path, monkeypatch):
     summary = json.loads((run_dir / "summary.json").read_text())
     assert summary["finished"] and summary["transient_error_retries"] == 1
     assert client.requests[1]["messages"] == client.requests[2]["messages"]
+
+
+def _status_error(msg, status=400):
+    import anthropic
+    import httpx2 as httpx
+
+    req = httpx.Request("POST", "https://example.invalid/v1/messages")
+    return anthropic.APIStatusError(msg, response=httpx.Response(status, request=req), body=None)
+
+
+RESUME_SCRIPT = [
+    _msg([{"type": "thinking", "thinking": "first", "signature": "s1"}, _brush(1, brush="watercolor", color="#5b6c8f")]),
+    _msg([_brush(2, start=[300, 300], end=[500, 420], curvature=-0.4)]),
+    _msg([{"type": "text", "text": "Pausing to think."}], stop="end_turn"),
+    _msg([_brush(3, brush="ink", start=[600, 700], end=[800, 650], pressure=[0.1, 1, 0.2], color="#111")]),
+    _msg([_brush(4, brush="spatter", start=[200, 800], end=[260, 780], color="#c44536", size=60)]),
+    _msg([{"type": "tool_use", "id": "t9", "name": "finish", "input": {"title": "Resumed"}}]),
+]
+
+
+def test_resume_matches_an_uninterrupted_run(tmp_path, monkeypatch):
+    from PIL import Image, ImageChops
+
+    monkeypatch.setattr("painterly.agent.time.sleep", lambda s: None)
+    cfg = lambda d: RunConfig(out_dir=d, inline_images=True, seed=4)  # noqa: E731
+
+    straight = FakeClient(RESUME_SCRIPT)
+    ref_dir = PaintingSession(cfg(tmp_path / "a"), client=straight).run()
+
+    # Same run, but the API fails for good on the 5th request.
+    broken = FakeClient(RESUME_SCRIPT[:4] + [_status_error("bad request")])
+    run_dir = PaintingSession(cfg(tmp_path / "b"), client=broken).run()
+    assert not json.loads((run_dir / "summary.json").read_text())["finished"]
+
+    rest = FakeClient(RESUME_SCRIPT[4:])
+    resumed = PaintingSession.resume(run_dir, client=rest)
+    resumed.run()
+
+    # the model got back exactly the conversation it would have had
+    from painterly.agent import _block_dict
+
+    def wire(msgs):
+        return [m if isinstance(m["content"], str) else {**m, "content": [_block_dict(b) for b in m["content"]]} for m in msgs]
+
+    assert wire(rest.requests[0]["messages"]) == wire(straight.requests[4]["messages"])
+    assert rest.requests[0]["system"] == straight.requests[4]["system"]
+    summary = json.loads((run_dir / "summary.json").read_text())
+    assert summary["finished"] and summary["title"] == "Resumed" and summary["actions"] == 4
+    a, b = Image.open(ref_dir / "final.png"), Image.open(run_dir / "final.png")
+    assert ImageChops.difference(a, b).getbbox() is None
+    assert ImageChops.difference(Image.open(replay(run_dir)), b).getbbox() is None
+    import pytest
+    with pytest.raises(SystemExit):
+        PaintingSession.resume(run_dir, client=FakeClient([]))
+
+
+def test_wobble_is_small_and_keeps_the_ends():
+    import numpy as np
+    from painterly.canvas import arc_path, hand_wobble
+
+    path, length = arc_path([100, 100], [500, 100], 0.0, 2.0)
+    w = hand_wobble(path, length, np.random.default_rng(1))
+    assert np.allclose(w[0], path[0]) and np.allclose(w[-1], path[-1])
+    off = np.abs(w[:, 1] - 100)
+    assert 0.5 < off.max() <= 5.0
