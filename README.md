@@ -19,6 +19,18 @@ python -m painterly sampler -o brushes.png  # brush reference sheet, no API call
 python -m painterly replay runs/<id>        # re-render a run from its log
 ```
 
+### Through a proxy or reseller
+
+Some providers don't pass through every Anthropic feature. Probe yours first; it makes a
+handful of tiny requests and tells you which flags you need:
+
+```bash
+python -m painterly check --base-url https://api.example.com --api-key-env MY_KEY_VAR
+python -m painterly run --model claude-haiku-5-5 --base-url ... --api-key-env MY_KEY_VAR \
+    --max-actions 5                # smoke test
+    # plus, if `check` says so: --inline-images --no-context-editing --no-thinking-summaries
+```
+
 Each session writes to `runs/<timestamp>/`:
 
 | file | what |

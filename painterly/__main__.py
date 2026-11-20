@@ -26,6 +26,19 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--no-fallbacks", action="store_true", help="don't let the API retry a declined request on another model")
     r.add_argument("--runs", type=int, default=1, help="how many independent sessions to run, one after another")
 
+    c = sub.add_parser("check", help="probe an endpoint for the API features the loop uses (tiny requests)")
+    c.add_argument("--model", default="claude-haiku-5-5")
+    c.add_argument("--effort", default="medium", choices=["low", "medium", "high", "xhigh", "max"])
+
+    for sp in (r, c):
+        sp.add_argument("--base-url", help="API base URL, for a proxy or reseller (default: Anthropic)")
+        sp.add_argument("--api-key-env", help="read the API key from this environment variable, e.g. COMET_API_KEY")
+
+    r.add_argument("--inline-images", action="store_true", help="send canvas views as base64 (no Files API)")
+    r.add_argument("--no-context-editing", action="store_true", help="don't ask the server to clear old canvas views")
+    r.add_argument("--no-thinking-summaries", action="store_true", help="don't request thinking summaries")
+    r.add_argument("--view-size", type=int, help="longest side of the image the model sees (default 1024; 768 with --inline-images)")
+
     p = sub.add_parser("replay", help="re-render a run from its event log")
     p.add_argument("run_dir", type=Path)
     p.add_argument("-o", "--output", type=Path)
@@ -48,6 +61,12 @@ def main(argv: list[str] | None = None) -> int:
         print(a.output)
         return 0
 
+    if a.cmd == "check":
+        from .check import run_checks
+
+        res = run_checks(RunConfig(model=a.model, effort=a.effort, base_url=a.base_url, api_key_env=a.api_key_env))
+        return 0 if res.get("basic request") else 1
+
     from .agent import PaintingSession
 
     w, h = (int(v) for v in a.size.lower().split("x"))
@@ -63,6 +82,12 @@ def main(argv: list[str] | None = None) -> int:
             out_dir=a.out,
             seed=a.seed + i,
             fallbacks=not a.no_fallbacks,
+            base_url=a.base_url,
+            api_key_env=a.api_key_env,
+            inline_images=a.inline_images,
+            context_editing=not a.no_context_editing,
+            thinking_summaries=not a.no_thinking_summaries,
+            view_size=a.view_size or (768 if a.inline_images else 1024),
             **({"system_prompt": a.prompt.read_text()} if a.prompt else {}),
         )
         session = PaintingSession(cfg)

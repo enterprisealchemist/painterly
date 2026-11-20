@@ -87,3 +87,15 @@ def test_full_loop(tmp_path):
     rp = replay(run_dir)
     assert ImageChops.difference(Image.open(rp), Image.open(run_dir / "final.png")).getbbox() is None
     assert "thinking" in (run_dir / "journal.md").read_text()
+
+
+def test_inline_images_without_optional_features(tmp_path):
+    client = FakeClient()
+    cfg = RunConfig(out_dir=tmp_path, max_actions=10, model="claude-haiku-5-5", inline_images=True,
+                    context_editing=False, thinking_summaries=False, view_size=768)
+    PaintingSession(cfg, client=client).run()
+    req = client.requests[1]
+    assert "context_management" not in req and "thinking" not in req and "betas" not in req
+    view = req["messages"][-1]["content"][-1]["content"][1]
+    assert view["source"]["type"] == "base64"
+    assert client.n == 0  # nothing went through the Files API

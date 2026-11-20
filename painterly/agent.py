@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import base64
 import io
 import json
+import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -34,8 +36,6 @@ FIRST_MESSAGE = "The canvas is ready."
 
 NUDGE = "(The canvas is still open. If you're done, call `finish`; otherwise carry on.)"
 
-BETAS = ["context-management-2025-06-27", "server-side-fallback-2026-07-01"]
-
 # Rough per-million-token prices for the cost estimate.
 PRICES = {
     "claude-opus-5-5": dict(input=4.0, output=20.0, cache_read=0.20, cache_write=5.0),
@@ -63,6 +63,25 @@ class RunConfig:
     seed: int = 0
     fallbacks: bool = True
     file_ttl_seconds: int = 2 * 24 * 3600
+    # Provider plumbing, for going through a proxy/reseller instead of api.anthropic.com.
+    base_url: str | None = None
+    api_key_env: str | None = None  # read the key from this env var instead of ANTHROPIC_API_KEY
+    inline_images: bool = False  # send canvas views as base64 instead of via the Files API
+    context_editing: bool = True  # server-side clearing of old canvas views
+    thinking_summaries: bool = True  # ask for readable thinking summaries for the journal
+    view_size: int = 1024  # longest side of the canvas image the model sees
+
+
+def make_client(cfg: RunConfig) -> anthropic.Anthropic:
+    kw: dict[str, Any] = {"max_retries": 5}
+    if cfg.base_url:
+        kw["base_url"] = cfg.base_url
+    if cfg.api_key_env:
+        key = os.environ.get(cfg.api_key_env)
+        if not key:
+            raise SystemExit(f"environment variable {cfg.api_key_env} is not set")
+        kw["api_key"] = key
+    return anthropic.Anthropic(**kw)
 
 
 @dataclass
@@ -96,7 +115,7 @@ def _jpeg(img: Image.Image, quality: int = 90) -> bytes:
 class PaintingSession:
     def __init__(self, cfg: RunConfig, client: anthropic.Anthropic | None = None):
         self.cfg = cfg
-        self.client = client or anthropic.Anthropic(max_retries=5)
+        self.client = client or make_client(cfg)
         self.canvas = Canvas(cfg.width, cfg.height, paper=cfg.paper, seed=cfg.seed)
         self.tools = tool_definitions(cfg.width, cfg.height)
         self.system = cfg.system_prompt.format(width=cfg.width, height=cfg.height, max_actions=cfg.max_actions)
@@ -133,6 +152,13 @@ class PaintingSession:
         Sending base64 would make every request carry every earlier canvas view (the client
         resends the whole conversation), which passes the request size limit in a long run.
         """
+        if img.width > self.cfg.view_size or img.height > self.cfg.view_size:
+            img = img.copy()
+            img.thumbnail((self.cfg.view_size, self.cfg.view_size), Image.LANCZOS)
+        if self.cfg.inline_images:
+            data = _jpeg(img, quality=82)
+            return {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg",
+                                                "data": base64.standard_b64encode(data).decode()}}
         data = _jpeg(img)
         try:
             meta = self.client.files.upload(
@@ -151,10 +177,15 @@ class PaintingSession:
             system=self.system,
             tools=self.tools,
             messages=self.messages,
-            thinking={"type": "adaptive", "display": "summarized"},
             output_config={"effort": self.cfg.effort},
             cache_control={"type": "ephemeral"},
-            context_management={
+            betas=[],
+        )
+        if self.cfg.thinking_summaries:
+            kwargs["thinking"] = {"type": "adaptive", "display": "summarized"}
+        if self.cfg.context_editing:
+            kwargs["betas"].append("context-management-2025-06-27")
+            kwargs["context_management"] = {
                 "edits": [
                     {
                         "type": "clear_tool_uses_20250919",
@@ -163,13 +194,12 @@ class PaintingSession:
                         "exclude_tools": ["finish"],
                     }
                 ]
-            },
-            betas=list(BETAS),
-        )
+            }
         if self.cfg.fallbacks and self.cfg.model in FALLBACK_MODELS:
+            kwargs["betas"].append("server-side-fallback-2026-07-01")
             kwargs["fallbacks"] = "default"
-        else:
-            kwargs["betas"].remove("server-side-fallback-2026-07-01")
+        if not kwargs["betas"]:
+            del kwargs["betas"]
         with self.client.beta.messages.stream(**kwargs) as stream:
             msg = stream.get_final_message()
         u = msg.usage
