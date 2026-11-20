@@ -18,7 +18,7 @@ def _msg(content, stop="tool_use"):
 
 
 def _brush(i, **kw):
-    args = {"brush": "bristle", "start": [100, 600], "end": [400, 560], "pressure": [0.3, 1, 0.4],
+    args = {"brush": "bristle", "points": [[100, 600], [250, 540], [400, 560]], "pressure": [0.3, 1, 0.4],
             "color": "#2d1e2f", "size": 40, **kw}
     return {"type": "tool_use", "id": f"t{i}", "name": "brush", "input": args}
 
@@ -27,17 +27,18 @@ SCRIPT = [
     _msg([
         {"type": "thinking", "thinking": "A wide quiet field, then one line.", "signature": "s"},
         {"type": "text", "text": "Starting with a wash."},
-        _brush(1, brush="watercolor", start=[50, 200], end=[420, 200], curvature=0.3, color="#5b6c8f", size=150),
+        _brush(1, brush="watercolor", points=[[50, 200], [420, 200]], color="#5b6c8f", size=150),
         _brush(2),  # a second call in the same turn is refused
     ]),
     _msg([_brush(3, brush="nope")]),  # unknown brush -> error
     _msg([{"type": "tool_use", "id": "t4", "name": "look", "input": {"x": 0, "y": 500, "width": 300, "height": 200}}]),
-    _msg([_brush(5, start=[0, 0], end=[900, 900])]),  # too long -> error
+    _msg([_brush(5, points=[[0, 0]] * 8)]),  # too many points -> error
     _msg([{"type": "tool_use", "id": "t6", "name": "fill", "input": {"color": "#000"}}]),  # not offered
     _msg([_brush(7)]),
-    _msg([_brush(8, brush="spatter", start=[500, 300], end=[500, 300], pressure=[1], color="#c44536", size=120)]),
+    _msg([_brush(8, brush="spatter", points=[[500, 300]], pressure=[1], color="#c44536", size=120)]),
     _msg([{"type": "tool_use", "id": "t9", "name": "undo", "input": {}}]),
-    _msg([_brush(10, brush="blender", start=[100, 150], end=[400, 250], pressure=[0.8], size=60)]),
+    _msg([_brush(10, brush="blender", points=[[100, 150], [400, 150], [400, 450], [100, 450]], smooth=False, closed=True,
+                 pressure=[0.8], size=60)]),
     _msg([{"type": "text", "text": "Hm."}], stop="end_turn"),
     _msg([{"type": "tool_use", "id": "t11", "name": "finish", "input": {"title": "Test", "note": "fine"}}]),
 ]
@@ -94,7 +95,7 @@ def test_full_loop(tmp_path):
 
     assert result(2)["is_error"]  # unknown brush
     assert result(3)["content"][0]["type"] == "image"  # look
-    assert result(4)["is_error"] and "at most 410 px" in result(4)["content"]
+    assert result(4)["is_error"] and "1 to 7" in result(4)["content"]
     assert result(5)["is_error"] and "no `fill` tool" in result(5)["content"]
     # nudge after a turn with no tool call
     assert client.requests[10]["messages"][-1]["content"].startswith("(The canvas")
@@ -119,11 +120,12 @@ def test_inline_images_without_optional_features(tmp_path):
 
 def test_no_undo_no_look(tmp_path):
     client = FakeClient([SCRIPT[-1]])
-    cfg = RunConfig(out_dir=tmp_path, allow_look=False, max_stroke_length=200)  # undo is off by default
+    cfg = RunConfig(out_dir=tmp_path, allow_look=False)  # undo is off by default
     PaintingSession(cfg, client=client).run()
     tools = client.requests[0]["tools"]
     assert [t["name"] for t in tools] == ["brush", "finish"]
-    assert "at most 200 px" in tools[0]["description"]
+    assert "at most" not in tools[0]["description"]  # no length limit by default
+    assert tools[0]["input_schema"]["properties"]["points"]["maxItems"] == 7
 
 
 def test_empty_refusals_are_resent(tmp_path, monkeypatch):
@@ -167,10 +169,11 @@ def _status_error(msg, status=400):
 
 RESUME_SCRIPT = [
     _msg([{"type": "thinking", "thinking": "first", "signature": "s1"}, _brush(1, brush="watercolor", color="#5b6c8f")]),
-    _msg([_brush(2, start=[300, 300], end=[500, 420], curvature=-0.4)]),
+    _msg([_brush(2, points=[[300, 300], [400, 250], [500, 420]], smooth=True)]),
     _msg([{"type": "text", "text": "Pausing to think."}], stop="end_turn"),
-    _msg([_brush(3, brush="ink", start=[600, 700], end=[800, 650], pressure=[0.1, 1, 0.2], color="#111")]),
-    _msg([_brush(4, brush="spatter", start=[200, 800], end=[260, 780], color="#c44536", size=60)]),
+    _msg([_brush(3, brush="ink", points=[[700, 600], [800, 700], [700, 800], [600, 700]], closed=True,
+                 pressure=[0.1, 1, 0.2], color="#111")]),
+    _msg([_brush(4, brush="spatter", points=[[200, 800], [260, 780]], color="#c44536", size=60)]),
     _msg([{"type": "tool_use", "id": "t9", "name": "finish", "input": {"title": "Resumed"}}]),
 ]
 
@@ -220,3 +223,23 @@ def test_wobble_is_small_and_keeps_the_ends():
     assert np.allclose(w[0], path[0]) and np.allclose(w[-1], path[-1])
     off = np.abs(w[:, 1] - 100)
     assert 0.5 < off.max() <= 5.0
+
+
+def test_node_paths():
+    import numpy as np
+    from painterly.canvas import node_path
+
+    sq, n = node_path([[0, 0], [100, 0], [100, 100], [0, 100]], smooth=False, closed=True, step=2)
+    assert abs(n - 400) < 1e-6 and np.allclose(sq[0], sq[-1])
+    ring, n = node_path([[100, 0], [0, 100], [-100, 0], [0, -100]], smooth=True, closed=True, step=2)
+    r = np.linalg.norm(ring, axis=1)
+    assert np.allclose(ring[0], ring[-1]) and r.min() > 85 and r.max() < 115 and 560 < n < 700  # close to a circle
+    dab, n = node_path([[5, 5]])
+    assert n == 0 and len(dab) == 1
+
+
+def test_length_limit_when_set(tmp_path):
+    client = FakeClient([_msg([_brush(1, points=[[0, 0], [900, 900]])]), SCRIPT[-1]])
+    PaintingSession(RunConfig(out_dir=tmp_path, max_stroke_length=410), client=client).run()
+    res = client.requests[1]["messages"][-1]["content"][0]
+    assert res["is_error"] and "at most 410 px" in res["content"]

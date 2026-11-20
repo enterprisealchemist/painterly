@@ -65,7 +65,7 @@ class RunConfig:
     context_editing: bool = True  # server-side clearing of old canvas views
     thinking_summaries: bool = True  # ask for readable thinking summaries for the journal
     view_size: int = 1024  # longest side of the canvas image the model sees
-    max_stroke_length: float | None = None  # px along the arc; default 40% of the longer side
+    max_stroke_length: float | None = None  # px along the path; None = no limit
     max_brush_size: float | None = None  # px; default 15% of the longer side
     allow_undo: bool = False  # every stroke is final, as on a real canvas
     allow_look: bool = True
@@ -90,8 +90,10 @@ def _is_transient(e: Exception) -> bool:
         return True
     status = getattr(e, "status_code", None)
     text = str(getattr(e, "message", "") or e).lower()
-    return (status in (408, 409, 429) or (status or 0) >= 500 or "overloaded" in text
-            or "temporarily unavailable" in text or "try again" in text)
+    # status 200: the error arrived as an event after the response had started, i.e. the
+    # server or an upstream backend failed partway; nothing was committed, so resend.
+    return (status in (200, 408, 409, 429) or (status or 0) >= 500 or "overloaded" in text
+            or "temporarily unavailable" in text or "try again" in text or "upstream" in text)
 
 
 def make_client(cfg: RunConfig) -> anthropic.Anthropic:

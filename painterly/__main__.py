@@ -37,7 +37,7 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--inline-images", action="store_true", help="send canvas views as base64 (no Files API)")
     r.add_argument("--no-context-editing", action="store_true", help="don't ask the server to clear old canvas views")
     r.add_argument("--no-thinking-summaries", action="store_true", help="don't request thinking summaries")
-    r.add_argument("--max-stroke-length", type=float, help="longest single stroke in px, along its arc (default 40%% of the longer side)")
+    r.add_argument("--max-stroke-length", type=float, help="longest single stroke in px, along its path (default: no limit)")
     r.add_argument("--max-brush-size", type=float, help="widest brush in px (default 15%% of the longer side)")
     r.add_argument("--undo", action="store_true", help="give it an undo tool (off by default: every stroke is final)")
     r.add_argument("--wobble", type=float, default=RunConfig.wobble, help="natural hand wobble, 0 for perfectly geometric strokes (default 1)")

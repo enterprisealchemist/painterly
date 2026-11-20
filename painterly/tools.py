@@ -7,7 +7,7 @@ from typing import Any
 
 import numpy as np
 
-from .canvas import BLEND_MODES, BRUSHES, Canvas, arc_length, arc_path, hand_wobble, hex_to_rgb
+from .canvas import BLEND_MODES, BRUSHES, Canvas, arc_path, hand_wobble, hex_to_rgb, node_path
 
 _brush_list = "\n".join(f"- {b.name}: {b.description}" for b in BRUSHES.values())
 
@@ -18,14 +18,14 @@ POINT = {"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems"
 class Limits:
     """Physical limits on a single stroke, in canvas pixels."""
 
-    max_stroke_length: float
+    max_stroke_length: float | None  # None: no limit
     max_brush_size: float
     wobble: float = 0.0  # natural hand wobble (see canvas.hand_wobble); runs set 1.0 by default
 
     @classmethod
-    def for_canvas(cls, width: int, height: int, stroke_frac: float = 0.4, brush_frac: float = 0.15) -> "Limits":
+    def for_canvas(cls, width: int, height: int, stroke_frac: float | None = None, brush_frac: float = 0.15) -> "Limits":
         side = max(width, height)
-        return cls(round(side * stroke_frac), round(side * brush_frac))
+        return cls(round(side * stroke_frac) if stroke_frac else None, round(side * brush_frac))
 
 
 def tool_definitions(width: int, height: int, limits: Limits | None = None, undo: bool = True, look: bool = True) -> list[dict[str, Any]]:
@@ -35,22 +35,26 @@ def tool_definitions(width: int, height: int, limits: Limits | None = None, undo
         {
             "name": "brush",
             "description": (
-                "Make one brushstroke: put the brush down at `start`, move it to `end` in a single "
-                "motion, and lift it. The stroke is a straight line or a single smooth arc "
-                f"(`curvature`). A stroke can be at most {lim.max_stroke_length:g} px long along its "
-                f"arc; for anything longer, use several strokes. Starting and ending at the same "
-                f"point makes a dab. {coord}\n\nBrushes:\n{_brush_list}"
+                "Make one brushstroke: put the brush down at the first point, move it through "
+                "each point in order in one continuous motion, and lift it at the last. Up to "
+                "7 points. Through them the stroke can flow as a smooth curve or turn sharp "
+                "corners, and it can close back on itself. A single point makes a dab."
+                + (f" A stroke can be at most {lim.max_stroke_length:g} px long; for anything "
+                   "longer, use several strokes." if lim.max_stroke_length else "")
+                + f" {coord}\n\nBrushes:\n{_brush_list}"
             ),
             "input_schema": {
                 "type": "object",
                 "properties": {
                     "brush": {"type": "string", "enum": list(BRUSHES)},
-                    "start": {**POINT, "description": "[x, y] where the brush touches down."},
-                    "end": {**POINT, "description": "[x, y] where it lifts off."},
-                    "curvature": {"type": "number", "description": (
-                        "How much the stroke bends, -1 to 1. 0 is straight; 1 bows into a half "
-                        "circle to the left of the direction of travel (as you see the canvas), -1 "
-                        "to the right. Default 0.")},
+                    "points": {"type": "array", "items": POINT, "minItems": 1, "maxItems": 7,
+                               "description": "[x, y] points the brush passes through, in order."},
+                    "smooth": {"type": "boolean", "description": (
+                        "true (default): a flowing curve through the points. false: straight lines "
+                        "between them, with sharp corners.")},
+                    "closed": {"type": "boolean", "description": (
+                        "true: after the last point, carry on back to the first, closing the "
+                        "stroke into a loop. Default false.")},
                     "pressure": {"type": "array", "items": {"type": "number"}, "minItems": 1, "maxItems": 12,
                                  "description": (
                         "Pressure along the stroke, 0-1, as values spaced evenly from start to end "
@@ -66,7 +70,7 @@ def tool_definitions(width: int, height: int, limits: Limits | None = None, undo
                         "How thinned the paint is, 0-0.95. Default 0 (straight from the tube); "
                         "higher is more transparent.")},
                 },
-                "required": ["brush", "start", "end", "pressure", "color", "size"],
+                "required": ["brush", "points", "pressure", "color", "size"],
                 "additionalProperties": False,
             },
             "eager_input_streaming": True,
@@ -194,8 +198,19 @@ def apply_tool(canvas: Canvas, name: str, args: dict[str, Any], rng_seed: int, l
         brush = _enum(args, "brush", BRUSHES)
         if brush is None:
             raise ToolError("`brush` is required")
-        start, end = _point(args, "start", canvas.w, canvas.h), _point(args, "end", canvas.w, canvas.h)
-        curvature = _num(args, "curvature", -1, 1, 0.0)
+        legacy = "points" not in args and "start" in args  # runs from before multi-point strokes
+        if legacy:
+            nodes = [_point(args, "start", canvas.w, canvas.h), _point(args, "end", canvas.w, canvas.h)]
+            curvature = _num(args, "curvature", -1, 1, 0.0)
+        else:
+            raw = args.get("points")
+            if not isinstance(raw, list) or not 1 <= len(raw) <= 7:
+                raise ToolError("`points` must be a list of 1 to 7 [x, y] points")
+            nodes = [_point({"point": q}, "point", canvas.w, canvas.h) for q in raw]
+            smooth = args.get("smooth", True)
+            closed = args.get("closed", False)
+            if not isinstance(smooth, bool) or not isinstance(closed, bool):
+                raise ToolError("`smooth` and `closed` must be true or false")
         pressure = args.get("pressure")
         if not (isinstance(pressure, list) and 1 <= len(pressure) <= 12
                 and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in pressure)):
@@ -207,22 +222,26 @@ def apply_tool(canvas: Canvas, name: str, args: dict[str, Any], rng_seed: int, l
             raise ToolError("`size` is required")
         if size > lim.max_brush_size:
             raise ToolError(f"size {size:g} is wider than the widest brush ({lim.max_brush_size:g} px)")
-        length = arc_length(start, end, curvature)
-        if length > lim.max_stroke_length + 0.5:
+        step = float(min(10.0, max(1.5, size * 0.175)))
+        if legacy:
+            path, length = arc_path(nodes[0], nodes[1], curvature, step)
+        else:
+            path, length = node_path(nodes, smooth, closed, step)
+        if lim.max_stroke_length and length > lim.max_stroke_length + 0.5:
             raise ToolError(
                 f"that stroke would be {length:.0f} px long; one stroke can be at most "
                 f"{lim.max_stroke_length:g} px. Nothing was painted. Use several shorter strokes.")
         load = _num(args, "load", 0, 1, 1.0)
         dilution = _num(args, "dilution", 0, 0.95, 0.0)
-        step = float(min(10.0, max(1.5, size * 0.175)))
-        path, _ = arc_path(start, end, curvature, step)
         if lim.wobble > 0:
             path = hand_wobble(path, length, np.random.default_rng([rng_seed, 7919]), lim.wobble)
         kw = dict(points=path.tolist(), brush=brush, color=color, size=size, opacity=1.0 - dilution,
                   taper_in=0.0, taper_out=0.0, fade=1.0 - load, pressure=pressure, dense=True, seed=rng_seed)
         canvas.checkpoint()
         canvas.stroke(**kw)
-        shape = "dab" if length < 1 else f"{length:.0f} px" + (f", curvature {curvature:+.2f}" if curvature else "")
+        shape = "dab" if length < 1 else f"{length:.0f} px through {len(nodes)} points"
+        if not legacy and len(nodes) > 1:
+            shape += (", smooth" if smooth else ", sharp corners") + (", closed" if closed else "")
         return {"summary": f"{brush} stroke, {shape}", "params": {k: v for k, v in kw.items() if k != "points"}}
 
     if name == "stroke":

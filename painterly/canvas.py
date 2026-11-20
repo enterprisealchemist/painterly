@@ -209,6 +209,47 @@ def arc_path(start, end, curvature: float = 0.0, step: float = 2.0) -> tuple[np.
     return centre + R * (np.cos(phi) * nrm + np.sin(phi) * e), length
 
 
+def node_path(points, smooth: bool = True, closed: bool = False, step: float = 2.0) -> tuple[np.ndarray, float]:
+    """The path a brush takes through `points` (in order), sampled every ~`step` px, and its length.
+
+    smooth: a flowing curve through every node (Catmull-Rom); otherwise straight lines
+    with sharp corners at the nodes. closed: the stroke carries on back to the first node.
+    """
+    pts = np.asarray(points, dtype=np.float64).reshape(-1, 2)
+    if len(pts) == 1 or np.allclose(pts, pts[0]):
+        return pts[:1].copy(), 0.0
+    if closed and len(pts) >= 3:
+        if smooth:
+            ring = np.vstack([pts[-1], pts, pts[0], pts[1]])  # wrap so the join is smooth too
+            out = [pts[0]]
+            for i in range(1, len(ring) - 2):
+                out.extend(_cr_segment(ring[i - 1], ring[i], ring[i + 1], ring[i + 2], step))
+            path = np.asarray(out)
+        else:
+            path = _polyline(np.vstack([pts, pts[0]]), step)
+    elif smooth and len(pts) >= 3:
+        path = _catmull_rom(pts, step)
+    else:
+        path = _polyline(pts, step)
+    length = float(np.linalg.norm(np.diff(path, axis=0), axis=1).sum())
+    return path, length
+
+
+def _cr_segment(p0, p1, p2, p3, step):
+    n = max(1, int(math.ceil(np.linalg.norm(p2 - p1) / step)))
+    ts = np.linspace(0, 1, n + 1)[1:, None]
+    t2, t3 = ts * ts, ts * ts * ts
+    return 0.5 * (2 * p1 + (-p0 + p2) * ts + (2 * p0 - 5 * p1 + 4 * p2 - p3) * t2 + (-p0 + 3 * p1 - 3 * p2 + p3) * t3)
+
+
+def _polyline(pts: np.ndarray, step: float) -> np.ndarray:
+    out = [pts[0]]
+    for a, b in zip(pts[:-1], pts[1:]):
+        n = max(1, int(math.ceil(np.linalg.norm(b - a) / step)))
+        out.extend(a + (b - a) * np.linspace(0, 1, n + 1)[1:, None])
+    return np.asarray(out, dtype=np.float64)
+
+
 def hand_wobble(path: np.ndarray, length: float, rng: np.random.Generator, amount: float = 1.0) -> np.ndarray:
     """Displace a path sideways by a smooth, low-frequency drift, like an unsteady hand.
 
@@ -466,7 +507,7 @@ class Canvas:
             along = lane_noise[lane, i0] * (1 - f) + lane_noise[lane, i0 + 1] * f
             dry = smoothstep(-0.08, 0.08, load + 0.3 * (along - 0.5) - thresh[lane] * dryness)
             body = edge(hardness)
-            if brush == "flat":
+            if brush == "flat" and not np.allclose(path[0], path[-1]):  # a closed loop has no ends
                 body = body * ((T > 0.0) & (T < 1.0))  # square ends
             alpha = body * streak * dry
         elif brush == "knife":

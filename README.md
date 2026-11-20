@@ -5,7 +5,7 @@ at a time, looking at the canvas after each one. It isn't given a subject, a sty
 decides for itself when the work is finished. The question is what it makes when the
 choice is entirely its own.
 
-![every brush: pressing in and lifting off, a steady arc, and an arc running dry](docs/brush_sampler.png)
+![every brush: a pressure swell, a wave, a square and a ring](docs/brush_sampler.png)
 
 ## Quick start
 
@@ -82,13 +82,14 @@ without acting twice in a row (it gets one neutral nudge first).
 | `undo` | off by default, so every stroke is final; `--undo` adds it |
 | `finish` | end the session, with an optional title and note |
 
-There's no fill, no shapes and no way to send a path. A `brush` call takes:
+There's no fill. Everything is made of brushstrokes. A `brush` call takes:
 
 | parameter | |
 |---|---|
 | `brush` | which brush (below) |
-| `start`, `end` | where the brush touches down and lifts off |
-| `curvature` | -1 to 1: straight, or a single smooth arc bowing left (+) or right (-) of the direction of travel |
+| `points` | 1–7 points the brush passes through, in order: touch down at the first, lift off at the last. One point is a dab |
+| `smooth` | `true` (default): a flowing curve through the points; `false`: straight lines with sharp corners |
+| `closed` | `true`: carry on back to the first point, closing a loop (a ring, a square outline) |
 | `pressure` | 1–12 values spaced evenly along the stroke, eased smoothly between. Sets the width and how much paint goes down. `[0.2, 1, 0.3]` presses in and lifts off |
 | `size` | width at full pressure |
 | `color` | hex |
@@ -99,21 +100,20 @@ There's no fill, no shapes and no way to send a path. A `brush` call takes:
 - **Turns.** The model makes one call per turn. This is asked of the API with
   `disable_parallel_tool_use` and also enforced by the loop, and it sees the canvas after
   every stroke.
-- **Stroke length.** A stroke can be at most 40% of the canvas's longer side along its arc
-  (410 px on 1024), like a stroke from the wrist or elbow, not a printer sweep.
-- **Brush size.** The widest brush is 15% of the canvas's longer side (154 px).
+- **Brush size.** The widest brush is 15% of the canvas's longer side (154 px on 1024).
+- **Stroke length.** There's no limit by default; `--max-stroke-length` sets one.
 - **Errors.** A call that breaks a limit is refused with an explanation, and nothing is
   painted.
-- **Changing them.** Use `--max-stroke-length` and `--max-brush-size`.
 
 ### Brushes
 
 `round`, `ink`, `bristle`, `flat`, `knife`, `watercolor`, `airbrush`, `charcoal`, `spatter`,
 and `blender`, a clean dry brush that softens the paint it passes over. Each row of the
-sheet above shows one brush:
-- **Left:** straight, pressing in and lifting off.
-- **Middle:** an arc at steady pressure.
-- **Right:** an arc the other way, with pressure fading and little paint loaded.
+sheet above shows one brush. From left to right:
+- a straight stroke pressing in and lifting off
+- a smooth wave through four points
+- a square (closed, sharp corners)
+- a ring (closed, smooth), with little paint loaded
 
 Strokes are rendered as continuous sweeps, not rows of stamps. Each pixel near a stroke
 knows how far along the stroke it is, how far across, and how much paint is left. Each
@@ -141,10 +141,11 @@ and easy to change:
 - **Memory is short-term.** Only the last few canvas views stay in context (`--keep-images`,
   via server-side context editing), along with all of its own words and tool calls. Like a
   painter, it sees the canvas as it is now, not every earlier state.
-- **It paints like a person.** One stroke per turn, with no fills or shapes, and strokes
-  only as long as an arm can sweep. It has to build up every area mark by mark.
+- **It paints like a person.** One stroke per turn and no fills, so it has to build up
+  every area mark by mark. A stroke can pass through up to 7 points, enough for a
+  gesture, a square or a ring, but not for tracing arbitrary outlines.
 - **No undo.** Every stroke is final, as on a real canvas (`--undo` to change that).
-- **An unsteady hand.** Each stroke drifts slightly off its ideal arc, by about 1% of its
+- **An unsteady hand.** Each stroke drifts slightly off its ideal path, by about 1% of its
   length and never more than 5 px. The drift is smooth, random and seeded, so replays are
   exact, and it's zero at both ends. `--wobble 0` turns it off.
 - **Run it many times.** One painting is an anecdote. With `--runs N` you can look for what
