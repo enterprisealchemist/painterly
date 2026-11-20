@@ -249,7 +249,7 @@ class PaintingSession:
     # ------------------------------------------------------------------ resume
     @classmethod
     def resume(cls, run_dir: Path, client: anthropic.Anthropic | None = None,
-               max_actions: int | None = None) -> "PaintingSession":
+               max_actions: int | None = None, thinking_summaries: bool | None = None) -> "PaintingSession":
         """Pick up a run where it stopped (an API error, Ctrl-C, a crash, or the model ending
         its turn without finishing). The canvas is rebuilt exactly by replaying the strokes
         it made, and the model gets back the same conversation, so it carries on as if
@@ -265,9 +265,14 @@ class PaintingSession:
         cfg = RunConfig(**{k: v for k, v in meta.items() if k in known})
         cfg.mixing = meta.get("mixing", "rgb")  # runs from before pigment mixing mixed like light
         cfg.open_ended = meta.get("open_ended", False)  # runs from before open-ended painting had finish
+        changed = False
         if max_actions:
-            cfg.max_actions = max_actions
-            meta["max_actions"] = max_actions
+            cfg.max_actions = meta["max_actions"] = max_actions
+            changed = True
+        if thinking_summaries is not None:
+            cfg.thinking_summaries = meta["thinking_summaries"] = thinking_summaries
+            changed = True
+        if changed:
             (run_dir / "config.json").write_text(json.dumps(meta, indent=2))
         cfg.out_dir = Path(cfg.out_dir)
         sess = cls(cfg, client, _resume_dir=run_dir)

@@ -59,6 +59,7 @@ def main(argv: list[str] | None = None) -> int:
     rs = sub.add_parser("resume", help="carry on a run that stopped before the model finished")
     rs.add_argument("run_dir", type=Path)
     rs.add_argument("--max-cost", type=float, help="new cost cap in USD for the resumed session")
+    rs.add_argument("--no-thinking-summaries", action="store_true", help="stop requesting thinking from here on")
     rs.add_argument("--max-actions", type=int, help="raise the session's stroke cap to keep an open-ended painting going")
 
     v = sub.add_parser("viewer", help="write a self-contained HTML page to step through a run's strokes")
@@ -83,7 +84,8 @@ def main(argv: list[str] | None = None) -> int:
     if a.cmd == "resume":
         from .agent import PaintingSession
 
-        session = PaintingSession.resume(a.run_dir, max_actions=a.max_actions)
+        session = PaintingSession.resume(a.run_dir, max_actions=a.max_actions,
+                                         thinking_summaries=False if a.no_thinking_summaries else None)
         if a.max_cost:
             session.cfg.max_cost_usd = a.max_cost
         out = session.run(on_event=lambda s: print("  " + s, flush=True))
