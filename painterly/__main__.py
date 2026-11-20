@@ -1,0 +1,76 @@
+"""Command line: `python -m painterly run` / `python -m painterly replay runs/<id>`."""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+from .agent import RunConfig
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(prog="painterly", description="Give a Claude model a canvas and see what it does.")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    r = sub.add_parser("run", help="start a painting session")
+    r.add_argument("--model", default=RunConfig.model)
+    r.add_argument("--effort", default=RunConfig.effort, choices=["low", "medium", "high", "xhigh", "max"])
+    r.add_argument("--size", default=f"{RunConfig.width}x{RunConfig.height}", help="canvas WxH, e.g. 1024x768")
+    r.add_argument("--paper", default=RunConfig.paper, help="paper colour (hex)")
+    r.add_argument("--max-actions", type=int, default=RunConfig.max_actions)
+    r.add_argument("--keep-images", type=int, default=RunConfig.keep_images, help="recent canvas views kept in context")
+    r.add_argument("--prompt", type=Path, help="file with a replacement system prompt ({width} {height} {max_actions} are filled in)")
+    r.add_argument("--out", type=Path, default=RunConfig.out_dir)
+    r.add_argument("--seed", type=int, default=0)
+    r.add_argument("--no-fallbacks", action="store_true", help="don't let the API retry a declined request on another model")
+    r.add_argument("--runs", type=int, default=1, help="how many independent sessions to run, one after another")
+
+    p = sub.add_parser("replay", help="re-render a run from its event log")
+    p.add_argument("run_dir", type=Path)
+    p.add_argument("-o", "--output", type=Path)
+
+    s = sub.add_parser("sampler", help="render a sheet showing every brush (no API calls)")
+    s.add_argument("-o", "--output", type=Path, default=Path("brush_sampler.png"))
+
+    a = ap.parse_args(argv)
+
+    if a.cmd == "replay":
+        from .replay import replay
+
+        print(replay(a.run_dir, a.output))
+        return 0
+
+    if a.cmd == "sampler":
+        from .sampler import render_sampler
+
+        render_sampler(a.output)
+        print(a.output)
+        return 0
+
+    from .agent import PaintingSession
+
+    w, h = (int(v) for v in a.size.lower().split("x"))
+    for i in range(a.runs):
+        cfg = RunConfig(
+            model=a.model,
+            effort=a.effort,
+            width=w,
+            height=h,
+            paper=a.paper,
+            max_actions=a.max_actions,
+            keep_images=a.keep_images,
+            out_dir=a.out,
+            seed=a.seed + i,
+            fallbacks=not a.no_fallbacks,
+            **({"system_prompt": a.prompt.read_text()} if a.prompt else {}),
+        )
+        session = PaintingSession(cfg)
+        print(f"[run {i + 1}/{a.runs}] → {session.dir}")
+        out = session.run(on_event=lambda s: print("  " + s, flush=True))
+        print((out / "summary.json").read_text())
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

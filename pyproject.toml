@@ -1,0 +1,18 @@
+[project]
+name = "painterly"
+version = "0.1.0"
+description = "Give an AI a blank canvas and a set of brushes, and see what it paints when nothing is asked of it."
+requires-python = ">=3.10"
+dependencies = ["anthropic>=2.11", "numpy>=2.0", "pillow>=11.0"]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.scripts]
+painterly = "painterly.__main__:main"
+
+[tool.setuptools]
+packages = ["painterly"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
