@@ -24,9 +24,16 @@ You have a blank canvas, {width} by {height} pixels, and a set of brushes.
 This painting is an exercise for yourself, not a task to complete. There's nothing to \
 deliver.
 
-Don't plan it out from the start. You paint one stroke at a time, and after each stroke \
-you'll see the canvas as it is now. Look at what's there, reflect on it, and let that \
-suggest the next stroke. Improvise, and let the painting develop and change as you go.
+Paint without an intention. Don't decide on a subject or picture what it will become. \
+Begin with an arbitrary stroke, anywhere, and see what it suggests. After each stroke \
+you'll see the canvas as it is now: look at what's there, respond to it, and let the \
+painting find its own way as you improvise.
+
+A stroke can be as large, long or intricate as you like. You simply see each one land \
+before you make the next.
+
+Let the paint come to cover roughly three quarters of the canvas. That will take many \
+strokes, and that's fine.
 
 When you feel it's finished, call `finish`."""
 
@@ -491,7 +498,7 @@ class PaintingSession:
                 continue
             if self.cfg.one_call_per_turn and acted and tu.name != "finish":
                 results.append({"type": "tool_result", "tool_use_id": tu.id, "is_error": True,
-                                "content": "Not done: one stroke at a time. You'll see the canvas after each one."})
+                                "content": "Not carried out: only the first call in a turn is made, so you can see how it landed before the next."})
                 continue
             if self.stats.actions >= self.cfg.max_actions and tu.name in MARKING_TOOLS:
                 results.append({"type": "tool_result", "tool_use_id": tu.id, "is_error": True,
@@ -561,6 +568,7 @@ class PaintingSession:
                 "cache_write": self.stats.cache_write,
             },
             "estimated_cost_usd": self.stats.cost(self.cfg.model),
+            "coverage": round(self.canvas.coverage(), 3),
         }
         (self.dir / "summary.json").write_text(json.dumps(summary, indent=2))
         if self.finished:

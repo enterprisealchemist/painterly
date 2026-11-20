@@ -79,6 +79,7 @@ def test_full_loop(tmp_path):
 
     summary = json.loads((run_dir / "summary.json").read_text())
     assert summary["finished"] and summary["title"] == "Test"
+    assert 0 < summary["coverage"] < 1
     assert summary["actions"] == 5  # watercolor, bristle, spatter dab, undo, blender
     assert (run_dir / "final.png").exists() and (run_dir / "timelapse.gif").exists()
 
@@ -86,7 +87,7 @@ def test_full_loop(tmp_path):
     assert client.requests[0]["tool_choice"] == {"type": "auto", "disable_parallel_tool_use": True}
     assert [t["name"] for t in client.requests[0]["tools"]] == ["brush", "look", "undo", "finish"]
     first = client.requests[1]["messages"][-1]["content"]
-    assert first[1]["is_error"] and "one stroke at a time" in first[1]["content"]
+    assert first[1]["is_error"] and "only the first call" in first[1]["content"]
     assert [b["type"] for b in first[0]["content"]] == ["text", "image"]  # view after the stroke, no countdown
 
     def result(n):

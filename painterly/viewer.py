@@ -91,6 +91,7 @@ def write_viewer(run_dir: Path, out: Path | None = None, max_side: int = 900) ->
             "strokes": summary.get("actions"),
             "requests": summary.get("requests"),
             "cost": summary.get("estimated_cost_usd"),
+            "coverage": summary.get("coverage"),
         },
         "frames": {str(i): _frame_uri(by_index[i], max_side) for i in used if i in by_index},
         "steps": steps,

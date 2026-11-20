@@ -35,7 +35,7 @@ def tool_definitions(width: int, height: int, limits: Limits | None = None, undo
         {
             "name": "brush",
             "description": (
-                "Make one brushstroke: put the brush down at the first point, move it through "
+                "Make a brushstroke: put the brush down at the first point, move it through "
                 "each point in order in one continuous motion, and lift it at the last. Up to "
                 "7 points. Through them the stroke can flow as a smooth curve or turn sharp "
                 "corners, and it can close back on itself. A single point makes a dab. Like a "

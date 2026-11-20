@@ -326,6 +326,10 @@ class Canvas:
         self._history: list[np.ndarray] = []
         self.max_undo = 30
 
+    def coverage(self, threshold: float = 0.04) -> float:
+        """Fraction of the canvas whose colour visibly differs from the bare paper."""
+        return float((np.abs(self.rgb - self.paper).max(axis=2) > threshold).mean())
+
     # ---------------------------------------------------------------- history
     def checkpoint(self) -> None:
         self._history.append(self.rgb.copy())

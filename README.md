@@ -133,9 +133,13 @@ and easy to change:
   model an artist. Even naming a brush "watercolor" nudges it, but some vocabulary is
   unavoidable. Use `--prompt my_prompt.txt` to compare framings, and see `config.json` for
   the exact text each run got.
-- **An exercise, not a task.** The prompt calls the painting an exercise for the model
-  itself, with nothing to deliver. It asks it not to plan from the start, but to look
-  after each stroke, reflect, and improvise as the painting develops.
+- **An exercise, not a task, painted without intention.** The prompt calls the painting an
+  exercise for the model itself, with nothing to deliver. It asks it not to choose a
+  subject, but to start with an arbitrary stroke and respond to what's on the canvas
+  after each one. It's told that a stroke can be as large or intricate as it likes.
+- **A coverage target.** The prompt asks for paint over roughly three quarters of the
+  canvas and says that many strokes are fine. `summary.json` records the actual
+  `coverage`: the fraction of the canvas visibly different from bare paper.
 - **Nothing about an audience.** The prompt doesn't say anyone will look at the painting,
   and it doesn't say nobody will.
 - **No budget in sight.** The model isn't told how many strokes it has, and there's no
