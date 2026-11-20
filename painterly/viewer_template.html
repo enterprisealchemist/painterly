@@ -292,6 +292,10 @@ details.brief p { margin: 10px 0 0; color: var(--muted); font-size: 14px; }
         return `<div class="note refused"><span class="label">Refused · nothing painted</span><p>${what}</p><p>${esc(n.error)}</p></div>`;
       }
       if (n.type === "critique") {
+        if (n.asked === false) {
+          return `<div class="note critique"><span class="label">The critic stopped by, unasked</span>
+            <p class="reply">${esc(n.text)}</p></div>`;
+        }
         const asked = n.message && n.message.trim()
           ? `<p class="asked">It showed the canvas and said: “${esc(n.message.trim())}”</p>`
           : `<p class="asked">It showed the canvas without a word.</p>`;

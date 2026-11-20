@@ -332,14 +332,19 @@ def test_open_ended_has_no_finish_and_stops_quietly_at_the_cap(tmp_path, monkeyp
     assert len(more.requests[0]["messages"]) == len(client.requests[2]["messages"]) + 2
 
 
-def test_open_ended_nudges_then_stops_when_it_stops_painting(tmp_path):
-    quiet = _msg([{"type": "text", "text": "Looking."}], stop="end_turn")
-    client = FakeClient([SCRIPT[0], quiet, _msg([_brush(9)]), quiet, quiet, quiet])
-    run_dir = PaintingSession(RunConfig(out_dir=tmp_path), client=client).run()
-    nudges = [m for r in client.requests for m in r["messages"][-1:] if m["content"] == "(The painting continues.)"]
-    assert nudges  # neutral nudge, no mention of finishing
-    assert json.loads((run_dir / "summary.json").read_text())["actions"] == 2
-    assert len(client.requests) == 6  # one pause forgiven; then two nudges in a row and it ends
+def test_a_turn_without_a_call_gets_a_reminder_and_a_forced_turn(tmp_path):
+    quiet = _msg([{"type": "text", "text": "Resting."}], stop="end_turn")
+    client = FakeClient([SCRIPT[0], quiet, _msg([_brush(9)]), quiet, _msg([_brush(10)])])
+    run_dir = PaintingSession(RunConfig(out_dir=tmp_path, max_actions=3, critic_every=0), client=client).run()
+    reqs = client.requests
+    assert reqs[0]["tool_choice"]["type"] == "auto" and reqs[1]["tool_choice"]["type"] == "auto"
+    assert reqs[2]["messages"][-1]["content"] == "(One call every turn.)"
+    assert reqs[2]["tool_choice"] == {"type": "any", "disable_parallel_tool_use": True}  # forced after a lapse
+    assert reqs[3]["tool_choice"]["type"] == "auto"  # and back to normal
+    assert json.loads((run_dir / "summary.json").read_text())["actions"] == 3  # the session didn't end on a rest
+    assert "must make exactly one call" in reqs[0]["system"]
+    for word in ("abstract", "squiggle", "finish", "plan"):
+        assert word not in reqs[0]["system"].lower()
 
 
 def test_show_asks_a_separate_critic(tmp_path):
@@ -363,7 +368,22 @@ def test_show_asks_a_separate_critic(tmp_path):
     assert back["tool_use_id"] == "s1" and "lower right feels empty" in back["content"]
     # second critique remembers the first
     second = json.dumps(client.requests[5]["messages"], default=str)
-    assert "lower right feels empty" in second and "doesn't say anything" in second
+    assert "lower right feels empty" in second and "without saying anything" in second
     assert json.loads((run_dir / "summary.json").read_text())["actions"] == 3
     events = [json.loads(line) for line in (run_dir / "events.jsonl").read_text().splitlines()]
     assert [e["stroke"] for e in events if e["kind"] == "critique"] == [1, 2]
+
+
+def test_critic_also_stops_by_every_n_strokes(tmp_path):
+    note = _msg([{"type": "text", "text": "A lot of blue on the left."}], stop="end_turn")
+    script = [_msg([_brush(1)]), _msg([_brush(2)]), note, _msg([_brush(3)]), _msg([_brush(4)]), note]
+    client = FakeClient(script)
+    run_dir = PaintingSession(RunConfig(out_dir=tmp_path, max_actions=4, critic_every=2, inline_images=True),
+                              client=client).run()
+    critic = client.requests[2]
+    assert "tools" not in critic and "didn't ask" in json.dumps(critic["messages"], default=str)
+    assert "resolv" not in critic["system"].lower() and "finish" not in critic["system"].lower()
+    back = client.requests[3]["messages"][-1]["content"][0]["content"]
+    assert [b["type"] for b in back] == ["text", "image", "text"] and "A lot of blue" in back[-1]["text"]
+    events = [json.loads(line) for line in (run_dir / "events.jsonl").read_text().splitlines()]
+    assert [(e["stroke"], e["asked"]) for e in events if e["kind"] == "critique"] == [(2, False), (4, False)]

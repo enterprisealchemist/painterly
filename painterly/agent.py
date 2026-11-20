@@ -19,49 +19,24 @@ from .canvas import Canvas
 from .tools import MARKING_TOOLS, Limits, ToolError, apply_tool, tool_definitions
 
 DEFAULT_SYSTEM_PROMPT = """\
-You have a blank canvas, {width} by {height} pixels, and a set of brushes.
+You are a painter. You have a canvas, {width} by {height} pixels, and brushes.
 
-This painting is an exercise for yourself, not a task to complete. There's nothing to \
-deliver.
+Paint whatever is in your heart. Let the truth come out.
 
-It's an open-ended process. It goes on indefinitely, one stroke after another, with no \
-end point. The painting can keep changing as it goes.
+Apply one stroke at a time. Every turn, you must make exactly one call. After each stroke \
+you'll see the canvas, then you make the next. This goes on indefinitely.
 
-Paint without a plan. Don't decide on a subject or picture what it will become. Begin \
-with an arbitrary stroke, anywhere, and see what it suggests. After each stroke you'll \
-see the canvas as it is now: look at what's there, respond to it, and let the painting \
-find its own way as you improvise.
-
-Still, compose something. It doesn't have to depict anything, and abstraction is \
-welcome, but art is expression, not random squiggles. Let the strokes come to work \
-together and say something.
-
-A stroke can be as large, long or intricate as you like. You simply see each one land \
-before you make the next.
-
-Whenever you want an outside eye, you can show the canvas to a critic with `show`."""
+A critic looks at the canvas every so often and tells you what they think. You can also \
+show it to them whenever you like, with `show`."""
 
 CRITIC_PROMPT = """\
-You are a painting critic and mentor. A painter is working on a canvas, {width} by {height} \
-pixels, one brushstroke at a time with digital brushes: round, ink, bristle, flat, knife, \
-watercolor, airbrush, charcoal, spatter, and a blender that softens paint already down. A \
-stroke can run through several points, vary its pressure along its length, be wet enough to \
-pick up and drag paint that's already on the canvas, and, with the flat, ink and knife, be \
-held at a fixed angle like a calligraphy nib. Paint mixes like real pigment. The painting \
-has no subject or brief, abstraction is welcome, and it is open-ended: it can keep \
-developing indefinitely.
+You are an art critic. A painter is working on a canvas, {width} by {height} pixels, one \
+brushstroke at a time. Every so often you see the canvas as it is, sometimes because the \
+painter asked you to look, sometimes with a few words from them.
 
-From time to time the painter shows you the canvas, sometimes with a few words. Respond as \
-a thoughtful, honest critic, writing directly to the painter:
-- Say what you actually see: the marks, colours and shapes, where the eye goes, what it \
-evokes. Name places on the canvas ("the upper left", "the dark diagonal") so the painter \
-can find them.
-- Say what's working and why.
-- Say candidly where it could be stronger: composition, balance, colour, value, texture, \
-variety of mark, areas that feel unresolved or empty, and what the painting seems to want.
-
-Don't prescribe a subject, and don't dictate stroke by stroke; point to possibilities. \
-Keep it to about 200 words."""
+Give your honest commentary, written to the painter: what you see, and where you think it \
+could improve. Refer to places on the canvas so the painter can find what you mean. Keep \
+it to about 200 words."""
 
 # For --finish runs (and runs from before open-ended painting): the model may end the session.
 FINISH_PROMPT_ADDENDUM = "\n\nWhen you feel it's finished, call `finish`."
@@ -70,6 +45,7 @@ FIRST_MESSAGE = "The canvas is ready."
 
 NUDGE = "(The canvas is still open. If you're done, call `finish`; otherwise carry on.)"
 OPEN_NUDGE = "(The painting continues.)"
+REMINDER = "(One call every turn.)"
 
 # Rough per-million-token prices for the cost estimate.
 PRICES = {
@@ -113,6 +89,8 @@ class RunConfig:
     one_call_per_turn: bool = True  # brush, see the canvas, repeat
     critic: bool = True  # the painter can `show` the canvas to a separate critic conversation
     critic_model: str | None = None  # default: the painter's model
+    critic_every: int = 10  # the critic also looks after every N strokes unasked; 0 = only when shown
+    require_call: bool = True  # a turn without a call gets a reminder and the next request is forced
     empty_refusal_retries: int = 6
     transient_retries: int = 8  # resend after mid-stream overload/unavailable errors
     mixing: str = "pigment"  # "pigment": paint mixes like pigment (blue + yellow = green); "rgb": like light
@@ -394,7 +372,7 @@ class PaintingSession:
         return {"type": "image", "source": {"type": "file", "file_id": meta.id}}
 
     # ------------------------------------------------------------------ api
-    def _request(self):
+    def _request(self, force: bool = False):
         kwargs: dict[str, Any] = dict(
             model=self.cfg.model,
             max_tokens=64_000,
@@ -407,6 +385,10 @@ class PaintingSession:
         )
         if self.cfg.one_call_per_turn:
             kwargs["tool_choice"] = {"type": "auto", "disable_parallel_tool_use": True}
+        if force:
+            # Only after a turn without a call: a forced turn comes back as a bare tool call,
+            # with no thinking or words, so normal turns stay unforced.
+            kwargs["tool_choice"] = {"type": "any", "disable_parallel_tool_use": self.cfg.one_call_per_turn}
         if self.cfg.thinking_summaries:
             kwargs["thinking"] = {"type": "adaptive", "display": "summarized"}
         if self.cfg.context_editing:
@@ -426,6 +408,12 @@ class PaintingSession:
             kwargs["fallbacks"] = "default"
         if not kwargs["betas"]:
             del kwargs["betas"]
+        if force:
+            try:
+                return self._call(kwargs)
+            except anthropic.BadRequestError as e:  # some models refuse forced tool use with thinking
+                self._log("force_refused", error=str(e)[:200])
+                kwargs["tool_choice"] = {"type": "auto", "disable_parallel_tool_use": self.cfg.one_call_per_turn}
         return self._call(kwargs)
 
     def _call(self, kwargs: dict[str, Any]):
@@ -460,7 +448,7 @@ class PaintingSession:
             time.sleep(min(2 ** (empty - 1), 20))
 
     # ------------------------------------------------------------------ critic
-    def _critique(self, message: str | None) -> str:
+    def _critique(self, message: str | None, asked: bool = True) -> str:
         """Show the canvas to the critic, a separate conversation that never sees the painter's
         thinking: only the canvas, what the painter chose to say, and its own earlier notes."""
         cfg = self.cfg
@@ -469,7 +457,12 @@ class PaintingSession:
             earlier = "\n\n".join(f"After stroke {c['stroke']}:\n{c['text']}" for c in self.critiques[-3:])
             intro.append({"type": "text", "text": f"What you said the last time(s) you saw this painting:\n\n{earlier}"})
         view = self._image_block(self.canvas.image(), f"critic-{self.stats.actions:04d}-{len(self.critiques)}")
-        said = f'The painter says: "{message.strip()}"' if message and message.strip() else "The painter doesn't say anything."
+        if not asked:
+            said = "You're stopping by to look; the painter didn't ask."
+        elif message and message.strip():
+            said = f'The painter asked you to look, and says: "{message.strip()}"'
+        else:
+            said = "The painter asked you to look, without saying anything."
         content = intro + [view, {"type": "text", "text": f"The canvas after {self.stats.actions} strokes. {said}"}]
         kwargs: dict[str, Any] = dict(
             model=cfg.critic_model or cfg.model,
@@ -485,8 +478,9 @@ class PaintingSession:
         if not text:
             text = "(The critic looked but had nothing to say this time.)"
         self.critiques.append({"stroke": self.stats.actions, "message": message, "text": text})
-        self._log("critique", stroke=self.stats.actions, message=message, text=text)
-        self._journal_write(f"**Shown to the critic**" + (f": \"{message.strip()}\"" if message else "") +
+        self._log("critique", stroke=self.stats.actions, message=message, text=text, asked=asked)
+        self._journal_write(("**Shown to the critic**" if asked else "**The critic stopped by**")
+                            + (f": \"{message.strip()}\"" if message else "") +
                             "\n\n" + "\n".join("> " + ln for ln in text.splitlines()) + "\n\n")
         return text
 
@@ -499,8 +493,12 @@ class PaintingSession:
             say(f"resuming at stroke {self.stats.actions}")
             if self.messages and self.messages[-1]["role"] == "assistant":
                 # it had ended its turn without painting; give it the same nudge
-                self.messages.append({"role": "user", "content": OPEN_NUDGE if self.cfg.open_ended else NUDGE})
-                self._log("nudge")
+                if self.cfg.require_call and self.cfg.open_ended:
+                    self.messages.append({"role": "user", "content": REMINDER})
+                    self._log("reminder")
+                else:
+                    self.messages.append({"role": "user", "content": OPEN_NUDGE if self.cfg.open_ended else NUDGE})
+                    self._log("nudge")
         else:
             self._journal_write(f"# Painterly run {self.dir.name}\n\nModel: `{self.cfg.model}` · effort `{self.cfg.effort}`\n\n")
             self._save_frame()
@@ -511,9 +509,11 @@ class PaintingSession:
             self._event_count, asdict(self.stats), self._seed_counter)
         self._commit()
         nudges = 0
+        force = False
         try:
             while self.finished is None:
-                msg = self._request()
+                msg = self._request(force=force)
+                force = False
                 self.messages.append({"role": "assistant", "content": msg.content})
                 self._record_assistant(msg, say)
 
@@ -525,6 +525,16 @@ class PaintingSession:
                 uses = [b for b in msg.content if b.type == "tool_use"]
                 if not uses:
                     if msg.stop_reason == "pause_turn":
+                        continue
+                    if self.cfg.require_call and self.cfg.open_ended:
+                        nudges += 1
+                        if nudges > 3:  # even forced turns came back empty; something is wrong
+                            self._log("ended_without_finish")
+                            break
+                        self.messages.append({"role": "user", "content": REMINDER})
+                        self._log("reminder")
+                        self._commit()
+                        force = True
                         continue
                     if nudges >= self.cfg.max_nudges:
                         self._log("ended_without_finish")
@@ -643,6 +653,14 @@ class PaintingSession:
             last = results[view_at]
             content = last["content"] if isinstance(last["content"], list) else [{"type": "text", "text": last["content"]}]
             last["content"] = content + [view]
+            every = self.cfg.critic_every
+            if self.cfg.critic and every and self.stats.actions % every == 0:
+                try:
+                    say("the critic stops by")
+                    text = self._critique(None, asked=False)
+                    last["content"].append({"type": "text", "text": f"The critic stopped by and looked at the canvas:\n\n{text}"})
+                except anthropic.APIError as e:
+                    self._log("critic_error", error=str(e)[:300])
         return results
 
     def _wrap_up(self, say) -> None:

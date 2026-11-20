@@ -36,7 +36,8 @@ def build_steps(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
             if ev.get("text", "").strip():
                 pending.append({"type": k, "text": ev["text"].strip()})
         elif k == "critique":
-            pending.append({"type": "critique", "message": ev.get("message"), "text": ev.get("text", "")})
+            pending.append({"type": "critique", "message": ev.get("message"), "text": ev.get("text", ""),
+                            "asked": ev.get("asked", True)})
         elif k == "critic_error":
             pending.append({"type": "system", "text": "It tried to show the canvas to the critic, who couldn't be reached."})
         elif k == "tool_error":
@@ -53,6 +54,8 @@ def build_steps(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 last_frame = ev.get("action", last_frame + 1)
                 steps.append({"frame": last_frame, "kind": tool, "stroke": ev.get("input"), "notes": pending})
                 pending = []
+        elif k == "reminder":
+            pending.append({"type": "system", "text": "It ended a turn without a call, was reminded \"(One call every turn.)\", and its next turn was required to make one."})
         elif k == "nudge":
             pending.append({"type": "system", "text": "It ended a turn without making a stroke and was nudged to carry on."})
         elif k == "resumed":

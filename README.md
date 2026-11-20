@@ -144,35 +144,30 @@ them; they're kept so older runs can be replayed.
 The experiment depends heavily on how the setup is framed, so these choices are deliberate
 and easy to change:
 
-- **The prompt suggests nothing.** No subject, mood or style, and it doesn't call the
-  model an artist. Even naming a brush "watercolor" nudges it, but some vocabulary is
-  unavoidable. Use `--prompt my_prompt.txt` to compare framings, and see `config.json` for
-  the exact text each run got.
-- **An exercise, not a task, painted without intention.** The prompt calls the painting an
-  exercise for the model itself, with nothing to deliver. It asks it not to choose a
-  subject, but to start with an arbitrary stroke and respond to what's on the canvas
-  after each one. It's told that a stroke can be as large or intricate as it likes.
-- **Open-ended.** The prompt says painting goes on indefinitely with no end point. There
-  is no `finish` tool, and nothing mentions finishing. A session stops quietly after
-  `--max-actions` strokes, or if the model stops making strokes even after a neutral
-  "(The painting continues.)". The model isn't told either way, and `resume --max-actions`
-  carries on from exactly that point. `--finish` brings back the old mode, where the model
-  decides when it's done.
-- **A critic.** Whenever it wants, the painter can `show` the canvas, optionally with a
-  message, to a separate critic conversation. The critic is the same model by default
-  (`--critic-model` to change it), with its own prompt: say what you see, what's working,
-  and where it could be stronger, without prescribing a subject. The critic sees only the
-  canvas, the painter's message and its own earlier notes, never the painter's thinking.
-  Its reply comes back as the result of the `show` call, so the painter reads it on its
-  next turn. `--no-critic` removes it.
-- **Compose something.** Abstraction is welcome, but the prompt asks for expression, with
-  the strokes working together, rather than random marks.
-- **A coverage expectation, not a target.** The prompt says most of the canvas will
-  probably end up covered, over many strokes. An earlier version gave a percentage, and the
-  model spent its thinking estimating coverage instead of painting. `summary.json` records
-  the actual `coverage`: the fraction of the canvas visibly different from bare paper.
-- **Nothing about an audience.** The prompt doesn't say anyone will look at the painting,
-  and it doesn't say nobody will.
+- **A stripped-down prompt.** The painter is told that it's a painter with a canvas and
+  brushes, to paint whatever is in its heart and let the truth come out, to apply one
+  stroke at a time (exactly one call every turn), and that it goes on indefinitely. It
+  isn't given a subject, mood or style, and it isn't told about abstraction, plans,
+  coverage or finishing. Earlier versions mentioned those, and each one visibly steered
+  the result. `--prompt my_prompt.txt` compares framings, and `config.json` has the exact
+  text each run got.
+- **One call every turn.** Normal turns aren't forced, so the painter's thinking and words
+  come through. If it ends a turn without a call, it's reminded "(One call every turn.)"
+  and the next request is forced. A forced turn comes back as a bare tool call with no
+  thinking. Resting never ends the session.
+- **Open-ended.** There is no `finish` tool, and nothing mentions finishing. A session
+  stops quietly after `--max-actions` strokes, without the model being told, and
+  `resume --max-actions` carries on from exactly that point. `--finish` brings back the old
+  mode, where the model decides when it's done.
+- **A critic.** A separate conversation with its own short prompt: give your honest
+  commentary, what you see and where it could improve. It isn't told anything about
+  resolving or finishing. It looks at the canvas every 10 strokes unasked
+  (`--critic-every`), and whenever the painter calls `show`, optionally with a message.
+  The critic sees only the canvas, the painter's message and its own last few notes,
+  never the painter's thinking. Its words come back to the painter on its next turn.
+  `--critic-model` sets a different model, and `--no-critic` removes the critic.
+- **Nothing about an audience.** The painter isn't told that anyone besides the critic
+  will see the painting, or that nobody will.
 - **No budget in sight.** The model isn't told how many strokes it has, and there's no
   countdown. Earlier runs that showed the budget used about half of it and
   planned to that size from the first thought.
