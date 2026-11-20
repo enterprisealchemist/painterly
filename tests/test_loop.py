@@ -268,3 +268,44 @@ def test_size_is_the_width_at_full_pressure():
             core = cov[195:205, 195:205].mean()
             width = (cov[:, 195:205].mean(axis=1) > core / 2).sum()
             assert 92 <= width <= 108, (brush, len(pts), width)
+
+
+def test_pigment_mixing_makes_green():
+    from painterly.canvas import hex_to_rgb
+    from painterly.pigment import mix
+
+    g = mix(hex_to_rgb("#1d4ed8"), hex_to_rgb("#facc15"), 0.5)
+    assert g[1] > g[0] + 0.1 and g[1] > g[2] + 0.05  # green, not grey
+    for c in ("#1d4ed8", "#f4f1ea", "#000000"):
+        assert abs(mix(hex_to_rgb(c), hex_to_rgb(c), 0.3) - hex_to_rgb(c)).max() < 2 / 255
+
+
+def test_wet_brush_drags_paint_and_angle_shapes_the_mark():
+    import numpy as np
+    from painterly.canvas import Canvas
+    from painterly.tools import Limits, apply_tool
+
+    L = Limits(None, 154, 0.0)
+    c = Canvas(400, 200, seed=1, mixing="pigment")
+    apply_tool(c, "brush", {"brush": "flat", "points": [[60, 20], [60, 180]], "pressure": [1], "color": "#1f4fbf", "size": 60}, 1, L)
+    dry, wet = c.rgb.copy(), None
+    apply_tool(c, "brush", {"brush": "round", "points": [[40, 100], [360, 100]], "pressure": [1], "color": "#f2c014",
+                            "size": 40, "wet": 0.9}, 2, L)
+    wet = c.rgb
+    # just past the blue stripe the wet yellow stroke carries blue: bluer than plain yellow
+    assert wet[100, 140, 2] > 0.25 and wet[100, 140, 2] > wet[100, 350, 2] + 0.1
+    # the carried paint thins out with distance, back toward the brush's own colour
+    yellow = np.array([0xf2, 0xc0, 0x14]) / 255
+    assert abs(wet[100, 350] - yellow).max() < abs(wet[100, 140] - yellow).max() / 3
+    assert np.allclose(dry[20:60, 200:], wet[20:60, 200:])  # nothing outside the stroke changed
+
+    def width(angle, pts):
+        c = Canvas(400, 400, seed=1)
+        apply_tool(c, "brush", {"brush": "flat", "points": pts, "pressure": [1], "color": "#000000", "size": 100,
+                                "angle": angle}, 1, L)
+        cov = (1 - c.rgb.mean(axis=2) / c.paper.mean()) > 0.5
+        return cov[:, 195:205].any(axis=1).sum() if pts[0][1] == pts[1][1] else cov[195:205].any(axis=0).sum()
+
+    across = width(90, [[50, 200], [350, 200]])  # vertical edge moving sideways: full width
+    along = width(0, [[50, 200], [350, 200]])  # horizontal edge moving sideways: thin
+    assert across > 90 and along < 20

@@ -22,6 +22,8 @@ from dataclasses import dataclass
 import numpy as np
 from PIL import Image, ImageDraw
 
+from . import pigment
+
 # --------------------------------------------------------------------------- utils
 
 
@@ -85,6 +87,7 @@ class BrushSpec:
     blend: str = "normal"  # default blend mode
     taper_in: float = 0.0
     taper_out: float = 0.0
+    nib_aspect: float | None = None  # thickness/width of a flat or chisel tip; enables `angle`
 
 
 # Each description says what the brush actually does; `painterly/sampler.py` draws them all.
@@ -96,8 +99,9 @@ BRUSHES: dict[str, BrushSpec] = {
         BrushSpec(
             "ink",
             "Pointed brush with ink: crisp, dark, fully opaque line. Good for calligraphic "
-            "marks that swell and thin with pressure.",
+            "marks that swell and thin with pressure. Given an `angle`, it becomes a chisel nib.",
             0.9,
+            nib_aspect=0.15,
         ),
         BrushSpec(
             "bristle",
@@ -108,15 +112,20 @@ BRUSHES: dict[str, BrushSpec] = {
         ),
         BrushSpec(
             "flat",
-            "Flat brush held square to the direction of travel: firm edges, faint streaks, "
-            "square ends. Good for blocking in areas.",
+            "Flat brush: firm edges, faint streaks, square ends. Good for blocking in areas. "
+            "Normally it's held square to the direction of travel, so it's full width all the "
+            "way; given an `angle`, it's held at that angle and goes thin where the stroke "
+            "runs along its edge.",
             0.85,
+            nib_aspect=0.12,
         ),
         BrushSpec(
             "knife",
             "Palette knife: an opaque, hard-edged slab of paint that skips over the paper's "
-            "grain, more so with light pressure or little paint loaded.",
+            "grain, more so with light pressure or little paint loaded. Takes an `angle` like "
+            "the flat brush.",
             0.95,
+            nib_aspect=0.1,
         ),
         BrushSpec(
             "watercolor",
@@ -311,7 +320,13 @@ def _taper(t: np.ndarray, tin: float, tout: float) -> np.ndarray:
 
 
 class Canvas:
-    def __init__(self, width: int = 1024, height: int = 1024, paper: str = "#f4f1ea", seed: int = 0):
+    def __init__(self, width: int = 1024, height: int = 1024, paper: str = "#f4f1ea", seed: int = 0,
+                 mixing: str = "rgb"):
+        """mixing: "pigment" mixes paint like real pigment (blue + yellow = green); "rgb"
+        mixes like light, as runs made before pigment mixing existed did."""
+        if mixing not in ("rgb", "pigment"):
+            raise ValueError(f"unknown mixing {mixing!r}")
+        self.mixing = mixing
         self.w, self.h = width, height
         self.rng = np.random.default_rng(seed)
         self.paper = hex_to_rgb(paper)
@@ -348,7 +363,11 @@ class Canvas:
         h, w = alpha.shape
         region = self.rgb[y0 : y0 + h, x0 : x0 + w]
         a = np.clip(alpha, 0, 1)[..., None]
-        if blend == "normal":
+        if blend == "normal" and self.mixing == "pigment":
+            m = a[..., 0] > 1e-3
+            c = color[m] if np.ndim(color) == 3 else color
+            region[m] = pigment.mix(region[m], c, a[m])
+        elif blend == "normal":
             region[:] = region * (1 - a) + color * a
         elif blend == "multiply":
             region[:] = region * (1 - a + a * color)
@@ -377,6 +396,8 @@ class Canvas:
         seed: int | None = None,
         pressure=None,
         dense: bool = False,
+        wet: float = 0.0,
+        angle: float | None = None,
     ) -> None:
         """`pressure`: samples (0-1) evenly spaced along the stroke; scales width and how much
         paint is laid down. `dense`: `points` is already a finished path (e.g. from
@@ -398,9 +419,11 @@ class Canvas:
         if brush == "spatter":
             alpha, x0, y0 = self._spatter(pts, radius, hardness, jitter, fade, rng, pressure, dense)
         else:
-            alpha, x0, y0 = self._sweep(pts, brush, radius, hardness, tin, tout, fade, rng, pressure, dense)
+            alpha, x0, y0 = self._sweep(pts, brush, radius, hardness, tin, tout, fade, rng, pressure, dense, angle)
         if alpha is None:
             return
+        if wet > 0 and brush not in ("spatter", "blender"):
+            rgb = self._wet_colour(rgb, float(np.clip(wet, 0, 1)), radius, x0, y0, alpha.shape)
         alpha = alpha * float(np.clip(opacity, 0, 1))
         if brush == "blender":
             # A clean dry brush: pulls neighbouring paint together where it passes.
@@ -412,7 +435,47 @@ class Canvas:
             return
         self._composite(alpha, rgb, x0, y0, blend)
 
-    def _sweep(self, pts, brush, radius, hardness, tin, tout, fade, rng, pressure=None, dense=False):
+    def _wet_colour(self, rgb, wet, radius, x0, y0, shape):
+        """Paint colour per pixel for a wet brush that picks up paint already on the canvas
+        and drags it along the stroke (cf. MyPaint's smudge and Fresh Paint's pickup map).
+
+        The canvas under the stroke is sampled in lanes across it, before this stroke lands.
+        Along each lane the brush carries a running mix of what it has passed over: an
+        exponential moving average along the arc length, weighted by how much paint (as
+        opposed to bare paper) was there. Each pixel then gets the brush's own colour mixed
+        with what the brush carries at that point, by `wet` times how much it carries.
+        """
+        path, cum, wpath, S, V, inside = self._fields
+        n, nl = len(path), 9
+        tangent = np.gradient(path, axis=0)
+        tangent /= np.maximum(np.linalg.norm(tangent, axis=1, keepdims=True), 1e-9)
+        normal = np.stack([-tangent[:, 1], tangent[:, 0]], axis=1)
+        offs = np.linspace(-0.85, 0.85, nl)
+        pts = path[:, None, :] + normal[:, None, :] * (offs[None, :, None] * wpath[:, None, None])
+        xi = np.clip(np.rint(pts[..., 0] - 0.5).astype(int), 0, self.w - 1)
+        yi = np.clip(np.rint(pts[..., 1] - 0.5).astype(int), 0, self.h - 1)
+        under = self.rgb[yi, xi]  # (n, nl, 3), the canvas before this stroke
+        amount = np.clip((np.abs(under - self.paper).max(axis=2) - 0.02) * 6.0, 0.0, 1.0)
+        carry = max(4.0, radius * 2 * (0.5 + 2.0 * wet))  # how far picked-up paint is dragged
+        ds = np.diff(cum, prepend=cum[0])
+        k = 1.0 - np.exp(-ds / carry)
+        col = np.empty((n, nl, 3), np.float32)
+        amt = np.empty((n, nl), np.float32)
+        c_acc, a_acc = under[0] * amount[0][:, None], amount[0].copy()
+        for i in range(n):
+            if i:
+                c_acc = c_acc * (1 - k[i]) + under[i] * amount[i][:, None] * k[i]
+                a_acc = a_acc * (1 - k[i]) + amount[i] * k[i]
+            col[i], amt[i] = c_acc / np.maximum(a_acc, 1e-6)[:, None], a_acc
+        idx = np.clip(np.searchsorted(cum, S) , 0, n - 1)
+        lane = np.clip(np.rint((np.clip(V, -1, 1) + 1) * 0.5 * (nl - 1)).astype(int), 0, nl - 1)
+        carried, share = col[idx, lane], (wet * amt[idx, lane])[..., None]
+        base = np.broadcast_to(rgb, carried.shape)
+        if self.mixing == "pigment":
+            return pigment.mix(base, carried, share)
+        return base * (1 - share) + carried * share
+
+    def _sweep(self, pts, brush, radius, hardness, tin, tout, fade, rng, pressure=None, dense=False, angle=None):
         step = float(np.clip(radius * 0.35, 1.5, 10.0))
         path = _catmull_rom(pts, step) if len(pts) >= 2 and not dense else pts
         if len(path) == 1:
@@ -424,6 +487,14 @@ class Canvas:
         wpath = radius * _taper(tpath, tin, tout)
         if pressure is not None:
             wpath = wpath * (0.06 + 0.94 * pressure_at(pressure, tpath))
+        aspect = BRUSHES[brush].nib_aspect
+        if angle is not None and aspect is not None and total > 1.0:
+            # A flat or chisel tip held at a fixed angle: the mark is as wide as the tip's
+            # extent across the direction of travel (full width moving across the edge,
+            # the tip's thickness moving along it).
+            tg = np.gradient(path, axis=0)
+            d = math.radians(float(angle)) - np.arctan2(tg[:, 1], tg[:, 0])
+            wpath = wpath * np.sqrt(np.sin(d) ** 2 + (aspect * np.cos(d)) ** 2)
 
         pad = int(radius * 1.6) + 3
         x0 = max(0, int(math.floor(path[:, 0].min())) - pad)
@@ -539,6 +610,7 @@ class Canvas:
             raise ValueError(f"unknown brush {brush!r}")
 
         alpha = np.where(inside, alpha, 0.0).astype(np.float32)
+        self._fields = (path, cum, wpath, S, V, inside)
         return alpha, x0, y0
 
     def _spatter(self, pts, radius, hardness, jitter, fade, rng, pressure=None, dense=False):

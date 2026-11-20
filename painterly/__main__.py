@@ -40,6 +40,8 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--no-thinking-summaries", action="store_true", help="don't request thinking summaries")
     r.add_argument("--max-stroke-length", type=float, help="longest single stroke in px, along its path (default: no limit)")
     r.add_argument("--max-brush-size", type=float, help="widest brush in px (default 15%% of the longer side)")
+    r.add_argument("--mixing", default=RunConfig.mixing, choices=["pigment", "rgb"],
+                   help="how paint colours mix: like pigment (blue + yellow = green) or like light")
     r.add_argument("--undo", action="store_true", help="give it an undo tool (off by default: every stroke is final)")
     r.add_argument("--wobble", type=float, default=RunConfig.wobble, help="natural hand wobble, 0 for perfectly geometric strokes (default 1)")
     r.add_argument("--no-look", action="store_true", help="no zooming in on the canvas")
@@ -118,6 +120,7 @@ def main(argv: list[str] | None = None) -> int:
             max_brush_size=a.max_brush_size,
             allow_undo=a.undo,
             wobble=a.wobble,
+            mixing=a.mixing,
             allow_look=not a.no_look,
             view_size=a.view_size or (768 if a.inline_images else 1024),
             **({"system_prompt": a.prompt.read_text()} if a.prompt else {}),

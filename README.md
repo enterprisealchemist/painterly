@@ -94,6 +94,8 @@ There's no fill. Everything is made of brushstrokes. A `brush` call takes:
 | `size` | width at full pressure |
 | `color` | hex |
 | `load` | optional: how much paint is on the brush; less, and it runs dry toward the end |
+| `wet` | optional: how much paint already on the canvas the brush picks up and drags along, mixed into its own colour |
+| `angle` | optional, for `flat`, `ink` and `knife`: hold the tip's broad edge at a fixed angle, so the mark goes thick and thin with direction like a calligraphy nib |
 | `dilution` | optional: how thinned the paint is (more transparent) |
 
 **Limits.**
@@ -121,6 +123,16 @@ brush is a function of those values. Bristle and flat brushes give each bristle 
 lane and its own paint supply, so a dry brush breaks into streaks. Grain-sensitive brushes
 (charcoal, knife, watercolor) all read the same paper texture, so their marks line up. To
 add a brush, add a `BrushSpec` and one branch in `Canvas._sweep` (`painterly/canvas.py`).
+
+**Paint mixes like pigment.** Overlapping paint mixes subtractively: blue over yellow
+gives green, not grey. Each colour becomes a 10-band reflectance spectrum, and the spectra
+are mixed by weighted geometric mean, using libmypaint's method and tables (ISC licence,
+see `painterly/pigment.py`). `--mixing rgb` switches back to mixing like light. A `wet`
+brush carries paint the way MyPaint's smudge and Fresh Paint's pickup map do. The canvas
+under the stroke is sampled before the stroke lands, in lanes across it. Along each lane,
+the brush keeps a running mix of the paint it has passed over, weighted by how much paint
+was there, and blends that into its own colour. The angled nib narrows the stroke's width
+by how far the tip's edge is turned toward the direction of travel.
 The engine still has free-form paths, polygon fills and region blur. The model can't reach
 them; they're kept so older runs can be replayed.
 
@@ -137,9 +149,12 @@ and easy to change:
   exercise for the model itself, with nothing to deliver. It asks it not to choose a
   subject, but to start with an arbitrary stroke and respond to what's on the canvas
   after each one. It's told that a stroke can be as large or intricate as it likes.
-- **A coverage target.** The prompt asks for paint over roughly three quarters of the
-  canvas and says that many strokes are fine. `summary.json` records the actual
-  `coverage`: the fraction of the canvas visibly different from bare paper.
+- **Compose something.** Abstraction is welcome, but the prompt asks for expression, with
+  the strokes working together, rather than random marks.
+- **A coverage expectation, not a target.** The prompt says most of the canvas will
+  probably end up covered, over many strokes. An earlier version gave a percentage, and the
+  model spent its thinking estimating coverage instead of painting. `summary.json` records
+  the actual `coverage`: the fraction of the canvas visibly different from bare paper.
 - **Nothing about an audience.** The prompt doesn't say anyone will look at the painting,
   and it doesn't say nobody will.
 - **No budget in sight.** The model isn't told how many strokes it has, and there's no

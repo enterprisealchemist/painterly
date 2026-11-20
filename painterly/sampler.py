@@ -28,7 +28,7 @@ def _variants(x: float, y: float) -> list[dict]:
 
 def render_sampler(out: Path) -> None:
     names = list(BRUSHES)
-    c = Canvas(1024, 110 + 100 * len(names), seed=1)
+    c = Canvas(1024, 110 + 100 * len(names), seed=1, mixing="pigment")
     seed = 0
     limits = Limits(None, 154, wobble=1.0)  # what a run uses on a 1024 canvas
 

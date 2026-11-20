@@ -24,16 +24,19 @@ You have a blank canvas, {width} by {height} pixels, and a set of brushes.
 This painting is an exercise for yourself, not a task to complete. There's nothing to \
 deliver.
 
-Paint without an intention. Don't decide on a subject or picture what it will become. \
-Begin with an arbitrary stroke, anywhere, and see what it suggests. After each stroke \
-you'll see the canvas as it is now: look at what's there, respond to it, and let the \
-painting find its own way as you improvise.
+Paint without a plan. Don't decide on a subject or picture what it will become. Begin \
+with an arbitrary stroke, anywhere, and see what it suggests. After each stroke you'll \
+see the canvas as it is now: look at what's there, respond to it, and let the painting \
+find its own way as you improvise.
+
+Still, compose something. It doesn't have to depict anything, and abstraction is \
+welcome, but art is expression, not random squiggles. Let the strokes come to work \
+together and say something.
 
 A stroke can be as large, long or intricate as you like. You simply see each one land \
 before you make the next.
 
-Let the paint come to cover roughly three quarters of the canvas. That will take many \
-strokes, and that's fine.
+Most of the canvas will probably end up covered in paint, over many strokes.
 
 When you feel it's finished, call `finish`."""
 
@@ -82,6 +85,7 @@ class RunConfig:
     one_call_per_turn: bool = True  # brush, see the canvas, repeat
     empty_refusal_retries: int = 6
     transient_retries: int = 8  # resend after mid-stream overload/unavailable errors
+    mixing: str = "pigment"  # "pigment": paint mixes like pigment (blue + yellow = green); "rgb": like light
     wobble: float = 1.0  # natural hand wobble on each stroke; 0 = perfectly geometric
 
 
@@ -167,7 +171,7 @@ class PaintingSession:
     def __init__(self, cfg: RunConfig, client: anthropic.Anthropic | None = None, *, _resume_dir: Path | None = None):
         self.cfg = cfg
         self.client = client or make_client(cfg)
-        self.canvas = Canvas(cfg.width, cfg.height, paper=cfg.paper, seed=cfg.seed)
+        self.canvas = Canvas(cfg.width, cfg.height, paper=cfg.paper, seed=cfg.seed, mixing=cfg.mixing)
         lim = Limits.for_canvas(cfg.width, cfg.height)
         self.limits = Limits(cfg.max_stroke_length or lim.max_stroke_length, cfg.max_brush_size or lim.max_brush_size,
                              wobble=cfg.wobble)
@@ -217,6 +221,7 @@ class PaintingSession:
             raise SystemExit(f"{run_dir} is already finished")
         known = {f.name for f in fields(RunConfig)}
         cfg = RunConfig(**{k: v for k, v in meta.items() if k in known})
+        cfg.mixing = meta.get("mixing", "rgb")  # runs from before pigment mixing mixed like light
         cfg.out_dir = Path(cfg.out_dir)
         sess = cls(cfg, client, _resume_dir=run_dir)
         sess.system = meta["system_prompt_rendered"]  # exactly what the model saw before

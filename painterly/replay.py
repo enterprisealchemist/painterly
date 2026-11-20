@@ -11,7 +11,8 @@ from .tools import Limits, ToolError, apply_tool
 
 def replay(run_dir: Path, out: Path | None = None) -> Path:
     cfg = json.loads((run_dir / "config.json").read_text())
-    canvas = Canvas(cfg["width"], cfg["height"], paper=cfg["paper"], seed=cfg["seed"])
+    canvas = Canvas(cfg["width"], cfg["height"], paper=cfg["paper"], seed=cfg["seed"],
+                    mixing=cfg.get("mixing", "rgb"))  # runs from before pigment mixing mixed like light
     default = Limits.for_canvas(cfg["width"], cfg["height"])
     limits = Limits(cfg.get("max_stroke_length") or default.max_stroke_length,
                     cfg.get("max_brush_size") or default.max_brush_size,

@@ -70,6 +70,17 @@ def tool_definitions(width: int, height: int, limits: Limits | None = None, undo
                     "load": {"type": "number", "description": (
                         "How much paint is on the brush, 0-1. Default 1. With less, the stroke "
                         "runs dry toward its end.")},
+                    "wet": {"type": "number", "description": (
+                        "0-1. Default 0: the brush lays down its own colour cleanly. Higher, and "
+                        "the brush is wet enough to pick up paint already on the canvas and drag "
+                        "it along the stroke, mixing it with its own colour (at 1, mostly what it "
+                        "picks up). Over bare paper there's nothing to pick up.")},
+                    "angle": {"type": "number", "description": (
+                        "For flat, ink and knife only. Degrees at which the tip's broad edge is "
+                        "held for the whole stroke: 0 horizontal, 90 vertical, 45 running from "
+                        "top-left to bottom-right. The mark is full width where the stroke moves "
+                        "across the edge and thin where it moves along it, like a calligraphy "
+                        "nib. Omit it to keep the tip square to the direction of travel.")},
                     "dilution": {"type": "number", "description": (
                         "How thinned the paint is, 0-0.95. Default 0 (straight from the tube); "
                         "higher is more transparent.")},
@@ -237,10 +248,13 @@ def apply_tool(canvas: Canvas, name: str, args: dict[str, Any], rng_seed: int, l
                 f"{lim.max_stroke_length:g} px. Nothing was painted. Use several shorter strokes.")
         load = _num(args, "load", 0, 1, 1.0)
         dilution = _num(args, "dilution", 0, 0.95, 0.0)
+        wet = _num(args, "wet", 0, 1, 0.0)
+        angle = _num(args, "angle", -3600, 3600)
         if lim.wobble > 0:
             path = hand_wobble(path, length, np.random.default_rng([rng_seed, 7919]), lim.wobble)
         kw = dict(points=path.tolist(), brush=brush, color=color, size=size, opacity=1.0 - dilution,
-                  taper_in=0.0, taper_out=0.0, fade=1.0 - load, pressure=pressure, dense=True, seed=rng_seed)
+                  taper_in=0.0, taper_out=0.0, fade=1.0 - load, pressure=pressure, dense=True, seed=rng_seed,
+                  wet=wet, angle=angle)
         canvas.checkpoint()
         canvas.stroke(**kw)
         shape = "dab" if length < 1 else f"{length:.0f} px through {len(nodes)} points"
