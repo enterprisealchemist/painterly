@@ -38,7 +38,9 @@ def tool_definitions(width: int, height: int, limits: Limits | None = None, undo
                 "Make one brushstroke: put the brush down at the first point, move it through "
                 "each point in order in one continuous motion, and lift it at the last. Up to "
                 "7 points. Through them the stroke can flow as a smooth curve or turn sharp "
-                "corners, and it can close back on itself. A single point makes a dab."
+                "corners, and it can close back on itself. A single point makes a dab. Like a "
+                "real hand, the brush wavers slightly from the exact path, by a few pixels at "
+                "most, and always starts and ends exactly on the first and last points."
                 + (f" A stroke can be at most {lim.max_stroke_length:g} px long; for anything "
                    "longer, use several strokes." if lim.max_stroke_length else "")
                 + f" {coord}\n\nBrushes:\n{_brush_list}"
@@ -62,7 +64,9 @@ def tool_definitions(width: int, height: int, limits: Limits | None = None, undo
                         "off, or [0.6] for steady pressure. Pressure sets the stroke's width "
                         "(size is the width at full pressure) and how much paint it lays down.")},
                     "color": {"type": "string", "description": "Hex colour, e.g. '#2b4a6f'."},
-                    "size": {"type": "number", "description": f"Width at full pressure in pixels (1-{lim.max_brush_size:g})."},
+                    "size": {"type": "number", "description": (
+                        f"Width of the stroke at full pressure, in pixels (1-{lim.max_brush_size:g}). "
+                        "Lighter pressure narrows it in proportion: at pressure 0.5 it is about half as wide.")},
                     "load": {"type": "number", "description": (
                         "How much paint is on the brush, 0-1. Default 1. With less, the stroke "
                         "runs dry toward its end.")},
@@ -106,7 +110,7 @@ def tool_definitions(width: int, height: int, limits: Limits | None = None, undo
         })
     tools.append({
         "name": "finish",
-        "description": "Call this when you are done with the canvas. Title and note are optional.",
+        "description": "Call this when you feel the painting is finished. Title and note are optional.",
         "input_schema": {
             "type": "object",
             "properties": {

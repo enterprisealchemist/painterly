@@ -87,58 +87,61 @@ class BrushSpec:
     taper_out: float = 0.0
 
 
+# Each description says what the brush actually does; `painterly/sampler.py` draws them all.
+# A stroke is `size` wide at full pressure (at half strength, for the soft-edged ones).
 BRUSHES: dict[str, BrushSpec] = {
     b.name: b
     for b in [
-        BrushSpec("round", "Plain round brush with a soft-firm edge and even coverage.", 0.6),
+        BrushSpec("round", "Round brush: even, opaque colour with a slightly soft edge.", 0.6),
         BrushSpec(
             "ink",
-            "Pointed brush with ink: crisp, fully saturated line whose width follows pressure "
-            "closely. Good for calligraphic marks.",
+            "Pointed brush with ink: crisp, dark, fully opaque line. Good for calligraphic "
+            "marks that swell and thin with pressure.",
             0.9,
-            taper_in=0.25,
-            taper_out=0.35,
         ),
         BrushSpec(
             "bristle",
-            "Hog-hair brush: visible bristle streaks along the stroke. With little paint loaded or "
-            "light pressure it breaks into dry-brush scratches.",
+            "Hog-hair brush: the paint lies in streaks along the stroke, so a little of what's "
+            "underneath shows through. With little paint loaded or light pressure it breaks up "
+            "into dry-brush scratches.",
             0.75,
         ),
         BrushSpec(
             "flat",
-            "Wide flat brush held square to the direction of travel: firm edges, faint streaking, "
-            "square-ish ends. Good for blocking in planes.",
+            "Flat brush held square to the direction of travel: firm edges, faint streaks, "
+            "square ends. Good for blocking in areas.",
             0.85,
         ),
         BrushSpec(
             "knife",
-            "Palette knife: opaque, hard-edged slab of paint that skips over the canvas grain, more "
-            "so with light pressure or as it runs out.",
+            "Palette knife: an opaque, hard-edged slab of paint that skips over the paper's "
+            "grain, more so with light pressure or little paint loaded.",
             0.95,
         ),
         BrushSpec(
             "watercolor",
-            "Transparent wash: soft body, darker pooled edges, pigment granulating in the paper grain. "
-            "Layers deepen like glazes rather than covering.",
+            "Transparent wash: pools darker at its edges and granulates in the paper grain. "
+            "It darkens what's underneath like a glaze instead of covering it, so a light "
+            "colour barely shows over a dark one.",
             0.3,
             blend="multiply",
         ),
         BrushSpec(
             "airbrush",
-            "Very soft gaussian spray with no edge. Builds up gradually; good for glows and haze.",
+            "Soft spray with no edge: solid along the centre, fading to nothing at about the "
+            "stroke's size. Light pressure or dilution gives a faint haze.",
             0.0,
         ),
         BrushSpec(
             "charcoal",
-            "Dry, grainy mark that catches only the raised tooth of the paper; heavier pressure "
-            "fills more of the grain.",
+            "Charcoal: a dry, grainy mark that catches the raised tooth of the paper; light "
+            "pressure leaves more paper showing.",
             0.5,
         ),
         BrushSpec(
             "spatter",
-            "Droplets flicked off the brush, scattered around the stroke. `size` sets the spread, "
-            "pressure how many droplets land.",
+            "Droplets flicked off the brush, landing within about `size` of the path. "
+            "Pressure sets how many land; a single point gives a small burst.",
             0.8,
         ),
     ]
@@ -147,7 +150,7 @@ BRUSHES: dict[str, BrushSpec] = {
 BRUSHES["blender"] = BrushSpec(
     "blender",
     "Clean, dry soft brush: lays down no paint, but blends and softens the paint it passes "
-    "over, like working wet paint together. Colour is ignored.",
+    "over. Colour is ignored.",
     0.2,
 )
 
@@ -472,7 +475,9 @@ class Canvas:
             P = pressure_at(pressure, T)
             load = load * (0.5 + 0.5 * P)
             dryness = dryness + 0.5 * (1.0 - P)
-        edge = lambda h: 1.0 - smoothstep(min(h, 0.97), 1.0, nd)  # noqa: E731
+        # Soft edges are centred on the stroke's nominal edge (nd = 1), so a stroke is `size`
+        # wide at half strength whatever its hardness: softness blurs the edge, it doesn't shrink it.
+        edge = lambda h: 1.0 - smoothstep(1.0 - max(0.03, (1.0 - h) * 0.45), 1.0 + max(0.03, (1.0 - h) * 0.45), nd)  # noqa: E731
 
         if brush in ("round", "ink", "blender"):
             alpha = edge(hardness)
@@ -480,7 +485,8 @@ class Canvas:
                 alpha *= 0.92 + 0.08 * grain
             alpha *= 0.35 + 0.65 * load if (fade > 0 or pressure is not None) else 1.0
         elif brush == "airbrush":
-            alpha = np.exp(-3.2 * nd * nd) * (nd < 1.6)
+            # soft spray, no hard edge; half strength at ~0.6 of the size, fading out by ~0.9
+            alpha = 1.0 - smoothstep(0.15, 1.1, nd)
             alpha *= load
         elif brush in ("bristle", "flat"):
             # One lane per bristle across the stroke; each lane has its own load and
@@ -507,7 +513,7 @@ class Canvas:
             along = lane_noise[lane, i0] * (1 - f) + lane_noise[lane, i0 + 1] * f
             dry = smoothstep(-0.08, 0.08, load + 0.3 * (along - 0.5) - thresh[lane] * dryness)
             body = edge(hardness)
-            if brush == "flat" and not np.allclose(path[0], path[-1]):  # a closed loop has no ends
+            if brush == "flat" and total > 1.0 and not np.allclose(path[0], path[-1]):  # dabs and closed loops have no ends
                 body = body * ((T > 0.0) & (T < 1.0))  # square ends
             alpha = body * streak * dry
         elif brush == "knife":

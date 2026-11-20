@@ -171,7 +171,7 @@ details.brief p { margin: 10px 0 0; color: var(--muted); font-size: 14px; }
   $("eyebrow").textContent = "Painterly run" + (date ? ` · ${date[1]}-${date[2]}-${date[3]} ${date[4]}:${date[5]}` : "");
   const meta = [
     ["Model", M.model], ["Effort", M.effort], ["Canvas", `${M.width} × ${M.height}`],
-    ["Strokes", `${strokeCount} of ${M.max_actions}`],
+    ["Strokes", `${strokeCount}`],
     ["Ended", M.finished ? "it called finish" : "without finishing"],
   ];
   if (M.cost != null) meta.push(["Cost", "$" + Number(M.cost).toFixed(4)]);
@@ -180,7 +180,8 @@ details.brief p { margin: 10px 0 0; color: var(--muted); font-size: 14px; }
   $("limits").textContent =
     `Tools: brush${M.undo ? ", undo" : ""}, look, finish. One stroke per turn; ` +
     (M.max_stroke_length ? `the longest stroke ${M.max_stroke_length} px, ` : "no limit on stroke length, ") +
-    `the widest brush ${M.max_brush_size} px, hand wobble ${M.wobble ? "on" : "off"}.`;
+    `the widest brush ${M.max_brush_size} px, hand wobble ${M.wobble ? "on" : "off"}. ` +
+    `A safety cap of ${M.max_actions} strokes${/up to \d+ strokes/.test(M.system_prompt || "") ? "" : ", which it wasn't told about"}.`;
 
   // ---- geometry (same arc as the engine, without the wobble)
   function arc(start, end, k) {
@@ -360,7 +361,7 @@ details.brief p { margin: 10px 0 0; color: var(--muted); font-size: 14px; }
     let html = "";
     if (s.kind === "start") {
       html = `<div class="step-head"><h2>The canvas is ready</h2></div>
-        <p class="none">${M.width} × ${M.height} px of bare paper, ${M.max_actions} strokes available. Step forward to see the first stroke and what led to it.</p>`;
+        <p class="none">${M.width} × ${M.height} px of bare paper. Step forward to see the first stroke and what led to it.</p>`;
     } else if (s.kind === "end") {
       const f = s.finish;
       html = `<div class="step-head"><h2>${f ? "Finished" : "Stopped"}</h2></div>` + notesHtml(s.notes);

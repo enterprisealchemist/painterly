@@ -13,7 +13,7 @@ choice is entirely its own.
 pip install -e .            # or: pip install -r requirements.txt
 export ANTHROPIC_API_KEY=... # or `ant auth login`
 
-python -m painterly run                     # one session, 150 strokes max
+python -m painterly run                     # one session (safety cap: 300 strokes, never shown to the model)
 python -m painterly run --runs 5 --seed 10  # five independent sessions
 python -m painterly sampler -o brushes.png  # brush reference sheet, no API calls
 python -m painterly resume runs/<id>        # carry on a run that stopped early
@@ -133,11 +133,18 @@ and easy to change:
   model an artist. Even naming a brush "watercolor" nudges it, but some vocabulary is
   unavoidable. Use `--prompt my_prompt.txt` to compare framings, and see `config.json` for
   the exact text each run got.
+- **An exercise, not a task.** The prompt calls the painting an exercise for the model
+  itself, with nothing to deliver. It asks it not to plan from the start, but to look
+  after each stroke, reflect, and improvise as the painting develops.
 - **Nothing about an audience.** The prompt doesn't say anyone will look at the painting,
-  and it doesn't say nobody will. It only says the canvas is the model's to do with as it
-  likes.
-- **Stopping, including stopping immediately, is allowed.** An empty canvas is a valid
-  result.
+  and it doesn't say nobody will.
+- **No budget in sight.** The model isn't told how many strokes it has, and there's no
+  countdown. A safety cap (`--max-actions`, default 300) exists, and it's only mentioned
+  if the model reaches it. Earlier runs that showed the budget used about half of it and
+  planned to that size from the first thought.
+- **The tools do what they say.** Every brush is `size` wide at full pressure. The
+  descriptions match the rendering, including the slight hand wobble, so the model
+  doesn't trip over results it didn't ask for. `tests/` checks the widths.
 - **Memory is short-term.** Only the last few canvas views stay in context (`--keep-images`,
   via server-side context editing), along with all of its own words and tool calls. Like a
   painter, it sees the canvas as it is now, not every earlier state.
@@ -160,7 +167,7 @@ and easy to change:
 - Canvas views are uploaded through the Files API and referenced by id, with a two-day
   expiry, so request size stays flat over a long session.
 - Cost: each canvas view is roughly 1.4k input tokens, and every stroke is a request. A rough estimate, not yet measured,
-  is $3–15 for a full 150-action session at `high` effort, mostly thinking output and
+  is $3–15 for a 150-stroke session at `high` effort, mostly thinking output and
   resent history. `summary.json` gives the figure for each run, so run one session before
   starting a batch. `--max-actions` and `--effort` are the main controls.
 - Tests: `pip install pytest && pytest` runs the whole loop against a scripted stand-in

@@ -18,7 +18,8 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--effort", default=RunConfig.effort, choices=["low", "medium", "high", "xhigh", "max"])
     r.add_argument("--size", default=f"{RunConfig.width}x{RunConfig.height}", help="canvas WxH, e.g. 1024x768")
     r.add_argument("--paper", default=RunConfig.paper, help="paper colour (hex)")
-    r.add_argument("--max-actions", type=int, default=RunConfig.max_actions)
+    r.add_argument("--max-actions", type=int, default=RunConfig.max_actions,
+                   help="safety cap on strokes (default 300); the model isn't told about it")
     r.add_argument("--keep-images", type=int, default=RunConfig.keep_images, help="recent canvas views kept in context")
     r.add_argument("--prompt", type=Path, help="file with a replacement system prompt ({width} {height} {max_actions} are filled in)")
     r.add_argument("--out", type=Path, default=RunConfig.out_dir)

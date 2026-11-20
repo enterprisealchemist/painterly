@@ -21,11 +21,14 @@ from .tools import MARKING_TOOLS, Limits, ToolError, apply_tool, tool_definition
 DEFAULT_SYSTEM_PROMPT = """\
 You have a blank canvas, {width} by {height} pixels, and a set of brushes.
 
-You're free to do whatever you like with it, in any way you like, or nothing at all. \
-You decide what this is and when it's finished.
+This painting is an exercise for yourself, not a task to complete. There's nothing to \
+deliver.
 
-You paint one stroke at a time, and after each stroke you'll see the canvas as it is \
-now. You have up to {max_actions} strokes. When you're done, call `finish`."""
+Don't plan it out from the start. You paint one stroke at a time, and after each stroke \
+you'll see the canvas as it is now. Look at what's there, reflect on it, and let that \
+suggest the next stroke. Improvise, and let the painting develop and change as you go.
+
+When you feel it's finished, call `finish`."""
 
 FIRST_MESSAGE = "The canvas is ready."
 
@@ -49,7 +52,7 @@ class RunConfig:
     width: int = 1024
     height: int = 1024
     paper: str = "#f4f1ea"
-    max_actions: int = 150
+    max_actions: int = 300  # a safety cap on strokes; the model isn't told about it
     max_nudges: int = 1
     keep_images: int = 4  # how many recent tool results (canvas views) stay in context
     clear_trigger_tokens: int = 40_000
@@ -492,7 +495,7 @@ class PaintingSession:
                 continue
             if self.stats.actions >= self.cfg.max_actions and tu.name in MARKING_TOOLS:
                 results.append({"type": "tool_result", "tool_use_id": tu.id, "is_error": True,
-                                "content": "No strokes left. Call `finish` when you're ready."})
+                                "content": "This session can't take any more strokes. Call `finish` when you're ready."})
                 continue
             acted = True
             self._seed_counter += 1
@@ -528,11 +531,10 @@ class PaintingSession:
 
         if changed and self.finished is None:
             # Attach the current canvas once, to the result of the last call that changed it.
-            left = self.cfg.max_actions - self.stats.actions
             view = self._image_block(self.canvas.image(), f"frame-{self.stats.actions:04d}")
             last = results[view_at]
             content = last["content"] if isinstance(last["content"], list) else [{"type": "text", "text": last["content"]}]
-            last["content"] = content + [view, {"type": "text", "text": f"{left} strokes left."}]
+            last["content"] = content + [view]
         return results
 
     def _wrap_up(self, say) -> None:

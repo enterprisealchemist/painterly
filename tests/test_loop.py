@@ -87,8 +87,7 @@ def test_full_loop(tmp_path):
     assert [t["name"] for t in client.requests[0]["tools"]] == ["brush", "look", "undo", "finish"]
     first = client.requests[1]["messages"][-1]["content"]
     assert first[1]["is_error"] and "one stroke at a time" in first[1]["content"]
-    assert [b["type"] for b in first[0]["content"]] == ["text", "image", "text"]  # view after the stroke
-    assert first[0]["content"][-1]["text"] == "19 strokes left."
+    assert [b["type"] for b in first[0]["content"]] == ["text", "image"]  # view after the stroke, no countdown
 
     def result(n):
         return client.requests[n]["messages"][-1]["content"][0]
@@ -124,7 +123,7 @@ def test_no_undo_no_look(tmp_path):
     PaintingSession(cfg, client=client).run()
     tools = client.requests[0]["tools"]
     assert [t["name"] for t in tools] == ["brush", "finish"]
-    assert "at most" not in tools[0]["description"]  # no length limit by default
+    assert "px long" not in tools[0]["description"]  # no length limit by default
     assert tools[0]["input_schema"]["properties"]["points"]["maxItems"] == 7
 
 
@@ -243,3 +242,28 @@ def test_length_limit_when_set(tmp_path):
     PaintingSession(RunConfig(out_dir=tmp_path, max_stroke_length=410), client=client).run()
     res = client.requests[1]["messages"][-1]["content"][0]
     assert res["is_error"] and "at most 410 px" in res["content"]
+
+
+def test_nothing_mentions_a_budget(tmp_path):
+    client = FakeClient([SCRIPT[0], SCRIPT[-1]])
+    PaintingSession(RunConfig(out_dir=tmp_path), client=client).run()
+    sent = json.dumps([client.requests[1]["system"], client.requests[1]["tools"],
+                       client.requests[1]["messages"]], default=str).lower()
+    for word in ("300", "strokes left", "budget", "remaining", "up to 300"):
+        assert word not in sent, word
+
+
+def test_size_is_the_width_at_full_pressure():
+    import numpy as np
+    from painterly.canvas import Canvas
+    from painterly.tools import Limits, apply_tool
+
+    for brush in ("round", "ink", "bristle", "flat", "knife", "charcoal"):
+        for pts in ([[50, 200], [350, 200]], [[200, 200]]):
+            c = Canvas(400, 400, seed=2)
+            apply_tool(c, "brush", {"brush": brush, "points": pts, "pressure": [1], "color": "#000000", "size": 100},
+                       3, Limits(None, 154, 0.0))
+            cov = 1 - c.rgb.mean(axis=2) / c.paper.mean()
+            core = cov[195:205, 195:205].mean()
+            width = (cov[:, 195:205].mean(axis=1) > core / 2).sum()
+            assert 92 <= width <= 108, (brush, len(pts), width)
