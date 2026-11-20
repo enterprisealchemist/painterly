@@ -450,3 +450,16 @@ def test_a_dropped_connection_mid_stream_is_resent(tmp_path, monkeypatch):
     run_dir = PaintingSession(RunConfig(open_ended=False, out_dir=tmp_path), client=client).run()
     summary = json.loads((run_dir / "summary.json").read_text())
     assert summary["finished"] and summary["transient_error_retries"] == 1
+
+
+def test_a_refusal_with_a_reason_is_not_resent(tmp_path, monkeypatch):
+    monkeypatch.setattr("painterly.agent.time.sleep", lambda s: None)
+    real = BetaMessage.model_validate({
+        "id": "msg_r", "type": "message", "role": "assistant", "model": "x", "content": [],
+        "stop_reason": "refusal", "stop_sequence": None, "usage": {"input_tokens": 400, "output_tokens": 0},
+        "stop_details": {"type": "refusal", "category": "cyber", "explanation": "blocked"},
+    })
+    client = FakeClient([SCRIPT[0], real, SCRIPT[-1]])
+    run_dir = PaintingSession(RunConfig(open_ended=False, out_dir=tmp_path), client=client).run()
+    summary = json.loads((run_dir / "summary.json").read_text())
+    assert not summary["finished"] and summary["empty_refusal_retries"] == 0 and len(client.requests) == 2

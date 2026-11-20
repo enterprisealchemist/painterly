@@ -118,7 +118,11 @@ def is_empty_refusal(msg) -> bool:
     this way, even a harmless one. Nothing was generated, so the identical request can
     simply be sent again. A real refusal from the model is left alone.
     """
-    return msg.stop_reason == "refusal" and not msg.content and not (msg.usage.output_tokens or 0)
+    if msg.stop_reason != "refusal" or msg.content or (msg.usage.output_tokens or 0):
+        return False
+    # A refusal that gives a category or an explanation is a real one: never resend it.
+    details = getattr(msg, "stop_details", None)
+    return not (getattr(details, "category", None) or getattr(details, "explanation", None))
 
 
 def _is_transient(e: Exception) -> bool:
