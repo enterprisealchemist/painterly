@@ -36,8 +36,15 @@ NUDGE = "(The canvas is still open. If you're done, call `finish`; otherwise car
 
 BETAS = ["context-management-2025-06-27", "server-side-fallback-2026-07-01"]
 
-# Rough per-million-token prices for the cost estimate (Claude Opus 5.5).
-PRICES = {"claude-opus-5-5": dict(input=4.0, output=20.0, cache_read=0.20, cache_write=5.0)}
+# Rough per-million-token prices for the cost estimate.
+PRICES = {
+    "claude-opus-5-5": dict(input=4.0, output=20.0, cache_read=0.20, cache_write=5.0),
+    # Haiku 5.5: prompt rates for requests under 100K tokens; cache rates approximate.
+    "claude-haiku-5-5": dict(input=0.10, output=0.50, cache_read=0.01, cache_write=0.125),
+}
+
+# Models that accept the server-side refusal fallback parameter.
+FALLBACK_MODELS = {"claude-fable-5-2", "claude-fable-5-1", "claude-opus-5-5", "claude-opus-5", "claude-sonnet-5-5"}
 
 
 @dataclass
@@ -159,7 +166,7 @@ class PaintingSession:
             },
             betas=list(BETAS),
         )
-        if self.cfg.fallbacks:
+        if self.cfg.fallbacks and self.cfg.model in FALLBACK_MODELS:
             kwargs["fallbacks"] = "default"
         else:
             kwargs["betas"].remove("server-side-fallback-2026-07-01")
