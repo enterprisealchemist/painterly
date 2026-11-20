@@ -429,3 +429,14 @@ def test_watch_reports_progress_critiques_and_the_end(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "stroke 2:" in out and "LOOP? 3 reminders" in out and "critic @2 (unasked)" in out
     assert "ERROR api_error: boom" in out and out.strip().splitlines()[-1].startswith("ENDED (session_cap)")
+
+
+def test_prompt_mentions_only_what_the_run_has(tmp_path):
+    client = FakeClient([_msg([_brush(1)])])
+    PaintingSession(RunConfig(out_dir=tmp_path, max_actions=1, critic=False, reflect=True), client=client).run()
+    req = client.requests[0]
+    assert "critic" not in req["system"] and "show" not in [t["name"] for t in req["tools"]]
+    assert "how you're feeling" in req["system"]
+    client = FakeClient([_msg([_brush(1)])])
+    PaintingSession(RunConfig(out_dir=tmp_path / "b", max_actions=1, critic_every=0), client=client).run()
+    assert "critic" in client.requests[0]["system"] and "feeling" not in client.requests[0]["system"]

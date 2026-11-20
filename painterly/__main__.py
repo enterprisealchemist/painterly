@@ -21,6 +21,8 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--max-actions", type=int, default=RunConfig.max_actions,
                    help="where this session stops (default 300); the model isn't told. Resume to go on.")
     r.add_argument("--no-critic", action="store_true", help="no critic to show the canvas to")
+    r.add_argument("--reflect", action="store_true",
+                   help="ask the painter, each turn, to say how it's feeling and what the painting brings up")
     r.add_argument("--critic-every", type=int, default=RunConfig.critic_every,
                    help="the critic also looks after every N strokes, unasked (0: only when shown)")
     r.add_argument("--critic-model", help="model for the critic (default: the painter's model)")
@@ -134,6 +136,7 @@ def main(argv: list[str] | None = None) -> int:
             mixing=a.mixing,
             open_ended=not a.finish,
             critic=not a.no_critic,
+            reflect=a.reflect,
             critic_model=a.critic_model,
             critic_every=a.critic_every,
             max_cost_usd=a.max_cost,

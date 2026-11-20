@@ -170,6 +170,10 @@ and easy to change:
   The critic sees only the canvas, the painter's message and its own last few notes,
   never the painter's thinking. Its words come back to the painter on its next turn.
   `--critic-model` sets a different model, and `--no-critic` removes the critic.
+- **Reflection (optional).** `--reflect` adds one line: each turn, before its stroke,
+  reflect in a sentence or two on how you're feeling and what the painting is bringing up,
+  and say whatever is honestly there. The words come with the stroke in the same turn, so
+  they don't cost a reminder.
 - **Nothing about an audience.** The painter isn't told that anyone besides the critic
   will see the painting, or that nobody will.
 - **No budget in sight.** The model isn't told how many strokes it has, and there's no

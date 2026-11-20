@@ -24,10 +24,15 @@ You are a painter. You have a canvas, {width} by {height} pixels, and brushes.
 Paint whatever is in your heart. Let the truth come out.
 
 Apply one stroke at a time. Every turn, you must make exactly one stroke. After each \
-stroke you'll see the canvas, then you make the next. This goes on indefinitely.
+stroke you'll see the canvas, then you make the next. This goes on indefinitely."""
 
-A critic looks at the canvas every so often and tells you what they think. You can also \
-show it to them whenever you like, with `show`, alongside a stroke."""
+# Added to the default prompt when the run has --reflect.
+REFLECT_LINE = """\n\nEach turn, before your stroke, reflect in a sentence or two on how you're feeling \
+and what the painting is bringing up for you. Say whatever is honestly there."""
+
+# Added to the default prompt when the run has a critic.
+CRITIC_LINE = """\n\nA critic looks at the canvas every so often and tells you what they think. You can \
+also show it to them whenever you like, with `show`, alongside a stroke."""
 
 CRITIC_PROMPT = """\
 You are an art critic. A painter is working on a canvas, {width} by {height} pixels, one \
@@ -91,6 +96,7 @@ class RunConfig:
     critic: bool = True  # the painter can `show` the canvas to a separate critic conversation
     critic_model: str | None = None  # default: the painter's model
     critic_every: int = 10  # the critic also looks after every N strokes unasked; 0 = only when shown
+    reflect: bool = False  # ask the painter to say how it's feeling and what the painting brings up, each turn
     require_call: bool = True  # a turn without a stroke gets a reminder and the next request must be a stroke
     empty_refusal_retries: int = 6
     transient_retries: int = 8  # resend after mid-stream overload/unavailable errors
@@ -192,8 +198,13 @@ class PaintingSession:
                                       finish=not cfg.open_ended, show=cfg.critic)
         self.tool_names = {t["name"] for t in self.tools}
         self.system = cfg.system_prompt.format(width=cfg.width, height=cfg.height, max_actions=cfg.max_actions)
-        if not cfg.open_ended and cfg.system_prompt == DEFAULT_SYSTEM_PROMPT:
-            self.system += FINISH_PROMPT_ADDENDUM
+        if cfg.system_prompt == DEFAULT_SYSTEM_PROMPT:
+            if cfg.reflect:
+                self.system += REFLECT_LINE
+            if cfg.critic:
+                self.system += CRITIC_LINE
+            if not cfg.open_ended:
+                self.system += FINISH_PROMPT_ADDENDUM
         if max(cfg.width, cfg.height) > cfg.view_size:
             self.system += (f"\n\n(The canvas image you see is scaled down to fit {cfg.view_size} pixels. "
                             f"Tool coordinates are always in canvas pixels, {cfg.width} by {cfg.height}.)")
