@@ -116,7 +116,10 @@ def _is_transient(e: Exception) -> bool:
     # status 200: the error arrived as an event after the response had started, i.e. the
     # server or an upstream backend failed partway; nothing was committed, so resend.
     return (status in (200, 408, 409, 429) or (status or 0) >= 500 or "overloaded" in text
-            or "temporarily unavailable" in text or "try again" in text or "upstream" in text)
+            or "temporarily unavailable" in text or "try again" in text or "upstream" in text
+            # a reseller's misconfigured backend, e.g. a Bedrock account without model access;
+            # the next request is usually routed to a working one
+            or "aws_invoke_error" in text or "not allowed for this account" in text)
 
 
 def make_client(cfg: RunConfig) -> anthropic.Anthropic:
